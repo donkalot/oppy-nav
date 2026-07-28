@@ -50,40 +50,43 @@
       width: 100%;
       border-right: 0;
       border-top: 1px solid #ddd;
-      max-height: 40vh;
-      transition: max-height 0.25s ease;
+      height: var(--sheet-h, 240px);
+      max-height: 88vh;
+      transition: height 0.22s ease;
       padding: 0 12px 12px;
       box-shadow: 0 -2px 8px rgba(0,0,0,0.08);
       z-index: 500;
+      overflow-y: auto;
+      overscroll-behavior: contain;
     }
-    #side.expanded { max-height: 75vh; }
+    #side.dragging { transition: none; }
     #sheetHandle {
       display: flex;
       align-items: center;
-      justify-content: space-between;
+      justify-content: center;
       position: sticky;
       top: 0;
       background: #fafafa;
-      margin: 0 -12px 6px;
-      padding: 8px 12px;
+      margin: 0 -12px 8px;
+      padding: 12px 12px 10px;
       border-bottom: 1px solid #eee;
-      cursor: pointer;
+      cursor: grab;
       user-select: none;
+      touch-action: none;
       z-index: 2;
     }
     #sheetHandle::before {
       content: '';
-      position: absolute;
-      top: 4px; left: 50%;
-      transform: translateX(-50%);
-      width: 40px; height: 4px;
-      background: #ccc;
-      border-radius: 2px;
+      display: block;
+      width: 44px; height: 5px;
+      background: #bbb;
+      border-radius: 3px;
     }
-    #sheetHandle .htitle { font-size: 13px; font-weight: 600; color: #333; margin-top: 4px; }
-    #sheetHandle .hchev { font-size: 16px; color: #666; margin-top: 4px; }
-    #side:not(.expanded) #list { display: none; }
-    #side:not(.expanded) #filters { display: none !important; }
+    #sheetHandle .htitle, #sheetHandle .hchev { display: none; }
+    #side.min > *:not(#sheetHandle) { display: none; }
+    #side.min { overflow: hidden; }
+    #side:not(.full) #list { display: none; }
+    #side:not(.full) #filters { display: none !important; }
     #side h1 { display: none; }
     input, button { font-size: 16px; }  /* prevent iOS zoom */
   }
@@ -368,15 +371,61 @@ document.getElementById('openNowFilter').addEventListener('change', (e) => {
 
 const sheetHandle = document.getElementById('sheetHandle');
 const sideEl = document.getElementById('side');
-function setSheetExpanded(open) {
-  sideEl.classList.toggle('expanded', open);
-  sheetHandle.querySelector('.hchev').textContent = open ? '▼' : '▲';
-  setTimeout(() => map.invalidateSize(), 260);
+const isMobile = () => window.matchMedia('(max-width: 768px)').matches;
+const SHEET_H = {
+  min: () => 52,
+  peek: () => 240,
+  full: () => Math.round(window.innerHeight * 0.85),
+};
+let sheetState = 'peek';
+function setSheetState(s) {
+  sheetState = s;
+  sideEl.classList.remove('min', 'full');
+  if (s === 'min' || s === 'full') sideEl.classList.add(s);
+  sideEl.style.setProperty('--sheet-h', SHEET_H[s]() + 'px');
+  setTimeout(() => map.invalidateSize(), 240);
 }
-sheetHandle.addEventListener('click', () => {
-  setSheetExpanded(!sideEl.classList.contains('expanded'));
+function nearestSheetState(h) {
+  return Object.entries(SHEET_H)
+    .map(([k, f]) => [k, Math.abs(f() - h)])
+    .sort((a, b) => a[1] - b[1])[0][0];
+}
+if (isMobile()) setSheetState('peek');
+
+let sheetDrag = null;
+sheetHandle.addEventListener('pointerdown', (e) => {
+  if (!isMobile()) return;
+  sheetDrag = { y: e.clientY, h: SHEET_H[sheetState](), moved: false };
+  sheetHandle.setPointerCapture(e.pointerId);
+  sideEl.classList.add('dragging');
 });
-window.addEventListener('resize', () => map.invalidateSize());
+sheetHandle.addEventListener('pointermove', (e) => {
+  if (!sheetDrag) return;
+  const dy = sheetDrag.y - e.clientY;  // positive = drag up
+  if (Math.abs(dy) > 4) sheetDrag.moved = true;
+  const newH = Math.min(SHEET_H.full(), Math.max(SHEET_H.min(), sheetDrag.h + dy));
+  sideEl.style.setProperty('--sheet-h', newH + 'px');
+});
+function endSheetDrag() {
+  if (!sheetDrag) return;
+  sideEl.classList.remove('dragging');
+  if (!sheetDrag.moved) {
+    const order = ['min', 'peek', 'full'];
+    const idx = order.indexOf(sheetState);
+    setSheetState(order[(idx + 1) % 3]);
+  } else {
+    const finalH = parseFloat(sideEl.style.getPropertyValue('--sheet-h'));
+    setSheetState(nearestSheetState(finalH));
+  }
+  sheetDrag = null;
+}
+sheetHandle.addEventListener('pointerup', endSheetDrag);
+sheetHandle.addEventListener('pointercancel', endSheetDrag);
+
+window.addEventListener('resize', () => {
+  if (isMobile()) sideEl.style.setProperty('--sheet-h', SHEET_H[sheetState]() + 'px');
+  map.invalidateSize();
+});
 
 document.getElementById('go').addEventListener('click', async () => {
   const btn = document.getElementById('go');
@@ -440,7 +489,6 @@ document.getElementById('go').addEventListener('click', async () => {
 
     renderShopList();
     updateStatsLine();
-    if (window.matchMedia('(max-width: 768px)').matches) setSheetExpanded(true);
     status('Done.');
   } catch (e) {
     status('Error: ' + e.message);
