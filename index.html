@@ -33,43 +33,52 @@
   #map { flex:1; }
   h1 { font-size:16px; margin:0 0 8px; }
   .row { margin-bottom:8px; }
-  label { display:block; font-size:12px; color:#555; margin-bottom:2px; }
+  label { display:block; font-size:12px; color:#4a4a4a; margin-bottom:2px; }
   input, button { width:100%; box-sizing:border-box; padding:6px; font-size:14px; }
   button { background:#2b6cb0; color:white; border:0; padding:8px; margin-top:6px; cursor:pointer; }
-  button:disabled { background:#888; }
-  .stats { font-size:12px; color:#444; margin:8px 0; }
-  .shop { padding:6px 4px; border-bottom:1px solid #eee; font-size:13px; cursor:pointer; }
+  button:disabled { background:#888; cursor:not-allowed; }
+  :focus-visible { outline: 2px solid #f59e0b; outline-offset: 2px; }
+  .skip-link { position:absolute; left:-9999px; top:0; z-index:1000; padding:8px 12px; background:#2b6cb0; color:#fff; text-decoration:none; }
+  .skip-link:focus { left:0; }
+  .stats { font-size:12px; color:#3a3a3a; margin:8px 0; }
+  #list { list-style:none; padding:0; margin:0; }
+  .shop { padding:8px 4px; border-bottom:1px solid #eee; font-size:13px; cursor:pointer; list-style:none; }
   .shop:hover { background:#eef4fb; }
   .shop.selected { background:#e6f4ea; border-left:3px solid #38a169; padding-left:6px; }
   .shop .name { font-weight:600; }
-  .shop .meta { color:#666; font-size:11px; }
-  #support { margin-top:14px; padding:10px 0 4px; border-top:1px solid #eee; font-size:11px; color:#666; text-align:center; }
-  #support a { color:#2b6cb0; text-decoration:none; }
-  #support a:hover { text-decoration:underline; }
+  .shop .meta { color:#595959; font-size:11px; }
+  #support { margin-top:14px; padding:10px 0 4px; border-top:1px solid #eee; font-size:11px; color:#595959; text-align:center; }
+  #support a { color:#2b6cb0; text-decoration:underline; }
   #installBtn { display:inline-block; margin-bottom:8px; padding:6px 12px; background:#2b6cb0; color:#fff; border:none; border-radius:4px; font-size:12px; cursor:pointer; }
   #installBtn:hover { background:#245a94; }
-  .shop-toggle { float:right; color:#2b6cb0; font-size:11px; font-weight:400; }
-  .shop.selected .shop-toggle { color:#c53030; }
+  .shop-toggle { float:right; color:#2b6cb0; font-size:12px; font-weight:600; padding:4px 8px; min-height:24px; min-width:48px; display:inline-flex; align-items:center; justify-content:center; text-decoration:underline; background:transparent; border:1px solid transparent; border-radius:3px; cursor:pointer; }
+  .shop-toggle:hover { background:#e6f0fa; }
+  .shop.selected .shop-toggle { color:#a52121; }
+  .shop.selected .shop-toggle:hover { background:#fae1e1; }
   .buffer-row { display:flex; align-items:center; gap:8px; }
   .buffer-row input[type=range] { flex:1; }
-  #status { font-size:12px; color:#888; margin-top:4px; }
+  #status { font-size:12px; color:#595959; margin-top:4px; min-height:1.2em; }
   #trip { display:none; border-top:2px solid #ddd; margin-top:10px; padding-top:10px; }
   #trip h2 { font-size:14px; margin:0 0 6px; }
   .trip-stop { padding:4px 6px; font-size:12px; background:#fff7ed; margin-bottom:2px; border-radius:3px; border-left:3px solid #d97706; }
   #autoPick { display:flex; align-items:center; gap:6px; margin-bottom:8px; font-size:12px; }
-  #autoPick label { flex:1; display:flex; align-items:center; gap:4px; }
-  #autoPick input[type=number] { padding:2px 4px; font-size:12px; }
-  #autoPick button { width:auto; padding:4px 10px; font-size:12px; margin-top:0; }
-  #tripStats { font-size:12px; color:#444; margin:6px 0; }
+  #autoPick label { flex:1; display:flex; align-items:center; gap:4px; color:#3a3a3a; }
+  #autoPick input[type=number] { padding:2px 4px; font-size:12px; min-height:24px; }
+  #autoPick button { width:auto; padding:4px 10px; font-size:12px; margin-top:0; min-height:24px; }
+  #tripStats { font-size:12px; color:#3a3a3a; margin:6px 0; }
   #trip button { background:#d97706; }
   #trip button.gmaps { background:#1a73e8; margin-top:4px; }
-  #trip button.secondary { background:#888; margin-top:4px; }
+  #trip button.secondary { background:#5a5a5a; margin-top:4px; }
   #filters { display:none; margin-top:8px; padding:8px; background:#f0f4f8; border-radius:4px; }
-  #filters .flabel { font-size:11px; font-weight:600; color:#555; margin-bottom:4px; }
-  #filters label.chk { display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer; padding:2px 0; }
-  #filters label.chk input { width:auto; }
-  #filters .fcount { font-size:11px; color:#888; margin-left:auto; }
+  #filters .flabel { font-size:11px; font-weight:600; color:#3a3a3a; margin-bottom:4px; }
+  #filters label.chk { display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer; padding:4px 0; min-height:24px; }
+  #filters label.chk input { width:auto; min-width:20px; min-height:20px; }
+  #filters .fcount { font-size:11px; color:#595959; margin-left:auto; }
   #filters hr { border:0; border-top:1px solid #d5dde6; margin:6px 0; }
+  .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+  @media (prefers-reduced-motion: reduce) {
+    #side, * { transition: none !important; animation: none !important; }
+  }
   #sheetHandle { display:none; }
 
   @media (max-width: 768px) {
@@ -123,53 +132,54 @@
 </style>
 </head>
 <body>
+<a class="skip-link" href="#list">Skip to shop list</a>
 <div id="app">
-  <div id="side">
-    <div id="sheetHandle"><span class="htitle">Op Shop Corridor</span><span class="hchev">▲</span></div>
+  <aside id="side" aria-label="Trip planner">
+    <div id="sheetHandle" role="button" tabindex="0" aria-label="Panel handle. Press Enter or Space to cycle size. Arrow up to expand, arrow down to collapse." aria-expanded="false" aria-controls="side"><span class="htitle">Op Shop Corridor</span><span class="hchev" aria-hidden="true">▲</span></div>
     <h1>Op Shop Corridor</h1>
     <div class="row">
-      <label>From</label>
-      <input id="from" value="Melbourne, VIC">
+      <label for="from">From</label>
+      <input id="from" value="Melbourne, VIC" autocomplete="off">
     </div>
     <div class="row">
-      <label>To</label>
-      <input id="to" value="Sydney, NSW">
+      <label for="to">To</label>
+      <input id="to" value="Sydney, NSW" autocomplete="off">
     </div>
     <div class="row">
-      <label>Corridor width: <span id="bufLbl">2</span> km</label>
+      <label for="buf">Corridor width: <span id="bufLbl">2</span> km</label>
       <div class="buffer-row">
-        <input id="buf" type="range" min="0.5" max="10" step="0.5" value="2">
+        <input id="buf" type="range" min="0.5" max="10" step="0.5" value="2" aria-valuemin="0.5" aria-valuemax="10">
       </div>
     </div>
     <button id="go">Find op shops along route</button>
-    <div id="status"></div>
-    <div class="stats" id="stats"></div>
-    <div id="filters">
-      <div class="flabel">Filter by chain</div>
-      <div id="chainFilters"></div>
+    <div id="status" role="status" aria-live="polite" aria-atomic="true"></div>
+    <div class="stats" id="stats" aria-live="polite"></div>
+    <div id="filters" role="group" aria-label="Filter options">
+      <div class="flabel" id="chainFiltersLabel">Filter by chain</div>
+      <div id="chainFilters" role="group" aria-labelledby="chainFiltersLabel"></div>
       <hr>
       <label class="chk"><input type="checkbox" id="openNowFilter"> Open now only <span class="fcount" id="openNowCount"></span></label>
     </div>
     <div id="trip">
       <h2>Trip planner</h2>
       <div id="autoPick" class="row">
-        <label>Auto-pick <input id="autoN" type="number" min="1" max="20" value="5" style="width:48px;"> shops closest to route</label>
+        <label for="autoN">Auto-pick <input id="autoN" type="number" min="1" max="20" value="5" style="width:48px;"> shops closest to route</label>
         <button id="autoPickBtn" class="secondary" disabled>Auto-pick</button>
       </div>
-      <div id="tripStops"></div>
-      <div id="tripStats"></div>
+      <div id="tripStops" aria-live="polite" aria-label="Selected trip stops"></div>
+      <div id="tripStats" aria-live="polite"></div>
       <button id="planBtn" disabled>Plan optimised trip</button>
       <button id="gmapsBtn" class="gmaps" disabled>Open in Google Maps</button>
       <button id="clearTripBtn" class="secondary">Clear selection</button>
-      <div id="gmapsNote" class="meta" style="font-size:11px;color:#a35300;margin-top:4px;"></div>
+      <div id="gmapsNote" class="meta" style="font-size:11px;color:#8a4500;margin-top:4px;" aria-live="polite"></div>
     </div>
-    <div id="list"></div>
+    <ul id="list" aria-label="Op shops in corridor"></ul>
     <div id="support">
       <button id="installBtn" style="display:none;">Install app</button>
-      Free & open source. If it saved you a detour, <a href="https://ko-fi.com/donkware" target="_blank" rel="noopener">buy me a coffee ☕</a>.
+      Free & open source. If it saved you a detour, <a href="https://ko-fi.com/donkware" target="_blank" rel="noopener">buy me a coffee <span aria-hidden="true">☕</span></a>.
     </div>
-  </div>
-  <div id="map"></div>
+  </aside>
+  <main id="map" aria-label="Interactive map of op shops. A list of visible shops appears in the sidebar." role="application"></main>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -323,19 +333,23 @@ function renderShopList() {
   const visible = filteredHits();
   for (const h of visible.slice(0, 200)) {
     const isSel = selIds.has(h.id);
-    const div = document.createElement('div');
-    div.className = 'shop' + (isSel ? ' selected' : '');
-    div.innerHTML = `<div class="name">${h.n} <span class="shop-toggle">${isSel ? '− remove' : '+ add'}</span></div><div class="meta">${(h.d*1000).toFixed(0)}m off route${h.o ? ' · '+h.o : ''}</div>`;
-    div.addEventListener('click', (ev) => {
-      if (ev.target.classList.contains('shop-toggle')) toggleSelected(h);
-      else map.setView([h.y, h.x], 15);
+    const li = document.createElement('li');
+    li.className = 'shop' + (isSel ? ' selected' : '');
+    const safeName = escapeHtml(h.n);
+    const safeOp = h.o ? ' · ' + escapeHtml(h.o) : '';
+    const btnLabel = isSel ? `Remove ${safeName} from trip` : `Add ${safeName} to trip`;
+    li.innerHTML = `<div class="name">${safeName} <button type="button" class="shop-toggle" aria-label="${btnLabel}" aria-pressed="${isSel}">${isSel ? '− remove' : '+ add'}</button></div><div class="meta">${(h.d*1000).toFixed(0)}m off route${safeOp}</div>`;
+    li.addEventListener('click', (ev) => {
+      if (ev.target.closest('.shop-toggle')) { toggleSelected(h); return; }
+      map.setView([h.y, h.x], 15);
     });
-    list.appendChild(div);
+    list.appendChild(li);
   }
   if (visible.length > 200) {
-    const more = document.createElement('div');
+    const more = document.createElement('li');
     more.className = 'meta';
     more.style.padding = '8px 4px';
+    more.style.listStyle = 'none';
     more.textContent = `... and ${visible.length - 200} more (showing nearest 200 to route)`;
     list.appendChild(more);
   }
@@ -423,6 +437,7 @@ function setSheetState(s) {
   sideEl.classList.remove('min', 'full');
   if (s === 'min' || s === 'full') sideEl.classList.add(s);
   sideEl.style.setProperty('--sheet-h', SHEET_H[s]() + 'px');
+  sheetHandle.setAttribute('aria-expanded', s === 'full' ? 'true' : 'false');
   setTimeout(() => map.invalidateSize(), 240);
 }
 function nearestSheetState(h) {
@@ -461,6 +476,24 @@ function endSheetDrag() {
 }
 sheetHandle.addEventListener('pointerup', endSheetDrag);
 sheetHandle.addEventListener('pointercancel', endSheetDrag);
+
+sheetHandle.addEventListener('keydown', (e) => {
+  if (!isMobile()) return;
+  const order = ['min', 'peek', 'full'];
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    const idx = order.indexOf(sheetState);
+    setSheetState(order[(idx + 1) % 3]);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    const idx = order.indexOf(sheetState);
+    if (idx < 2) setSheetState(order[idx + 1]);
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    const idx = order.indexOf(sheetState);
+    if (idx > 0) setSheetState(order[idx - 1]);
+  }
+});
 
 window.addEventListener('resize', () => {
   if (isMobile()) sideEl.style.setProperty('--sheet-h', SHEET_H[sheetState]() + 'px');
