@@ -1,0 +1,16 @@
+{
+  "name": "Op Shop Corridor",
+  "short_name": "OpShop",
+  "description": "Find op shops along your route across Australia.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#fafafa",
+  "theme_color": "#2b6cb0",
+  "categories": ["travel", "shopping", "utilities"],
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icon-maskable.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}

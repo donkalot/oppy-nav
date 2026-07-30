@@ -4,6 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Op Shop Corridor — prototype</title>
+<meta name="description" content="Find op shops along your route across Australia.">
+<meta name="theme-color" content="#2b6cb0">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="OpShop">
+<meta property="og:title" content="Op Shop Corridor">
+<meta property="og:description" content="Find op shops along your route across Australia.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://donkalot.github.io/oppy-nav/">
 <script data-goatcounter="https://oppy-nav.goatcounter.com/count"
         async src="//gc.zgo.at/count.js"></script>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -27,6 +39,8 @@
   #support { margin-top:14px; padding:10px 0 4px; border-top:1px solid #eee; font-size:11px; color:#666; text-align:center; }
   #support a { color:#2b6cb0; text-decoration:none; }
   #support a:hover { text-decoration:underline; }
+  #installBtn { display:inline-block; margin-bottom:8px; padding:6px 12px; background:#2b6cb0; color:#fff; border:none; border-radius:4px; font-size:12px; cursor:pointer; }
+  #installBtn:hover { background:#245a94; }
   .shop-toggle { float:right; color:#2b6cb0; font-size:11px; font-weight:400; }
   .shop.selected .shop-toggle { color:#c53030; }
   .buffer-row { display:flex; align-items:center; gap:8px; }
@@ -136,6 +150,7 @@
     </div>
     <div id="list"></div>
     <div id="support">
+      <button id="installBtn" style="display:none;">Install app</button>
       Free & open source. If it saved you a detour, <a href="https://ko-fi.com/donkware" target="_blank" rel="noopener">buy me a coffee ☕</a>.
     </div>
   </div>
@@ -560,6 +575,30 @@ document.getElementById('clearTripBtn').addEventListener('click', () => {
   if (tripLayer) { map.removeLayer(tripLayer); tripLayer = null; }
   document.getElementById('tripStats').textContent = '';
   renderShopList();
+});
+
+// PWA: register service worker + surface an Install button when the browser offers it.
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+}
+let deferredInstall = null;
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  deferredInstall = e;
+  const btn = document.getElementById('installBtn');
+  if (btn) btn.style.display = 'inline-block';
+});
+document.addEventListener('click', async e => {
+  if (e.target && e.target.id === 'installBtn' && deferredInstall) {
+    deferredInstall.prompt();
+    await deferredInstall.userChoice;
+    deferredInstall = null;
+    e.target.style.display = 'none';
+  }
+});
+window.addEventListener('appinstalled', () => {
+  const btn = document.getElementById('installBtn');
+  if (btn) btn.style.display = 'none';
 });
 </script>
 </body>
