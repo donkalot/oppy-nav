@@ -325,6 +325,32 @@ def dedupe(shops):
     return kept
 
 
+# ----- Quality guards -----
+# Baselines from the first successful run (2026-07-30): vinnies 453, redcross 177,
+# salvos 310, osm 757, total kept 1697. Thresholds are ~25% below actuals so upstream
+# API drift or partial outages fail the run instead of silently publishing broken data.
+MIN_COUNTS = {
+    'vinnies': 350,
+    'redcross': 130,
+    'salvos': 230,
+    'osm': 600,
+    'total_kept': 1400,
+}
+
+
+def assert_quality(by_source, total_kept):
+    problems = []
+    for k, threshold in MIN_COUNTS.items():
+        actual = total_kept if k == 'total_kept' else by_source.get(k, 0)
+        if actual < threshold:
+            problems.append(f'{k}: got {actual}, expected >= {threshold}')
+    if problems:
+        print('\nQUALITY GUARD FAILED — not rebuilding index.html:', file=sys.stderr)
+        for p in problems:
+            print(f'  - {p}', file=sys.stderr)
+        sys.exit(1)
+
+
 # ----- Build -----
 
 def compact_records(shops):
@@ -372,6 +398,7 @@ def main():
     print(f'Dedupe: {len(deduped)} kept, {len(all_shops)-len(deduped)} dropped', flush=True)
     print(f'By source: {by_source} · with hours: {with_hours}', flush=True)
 
+    assert_quality(by_source, len(deduped))
     rebuild_html(compact_records(deduped))
 
 
