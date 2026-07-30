@@ -49,6 +49,10 @@
   #trip { display:none; border-top:2px solid #ddd; margin-top:10px; padding-top:10px; }
   #trip h2 { font-size:14px; margin:0 0 6px; }
   .trip-stop { padding:4px 6px; font-size:12px; background:#fff7ed; margin-bottom:2px; border-radius:3px; border-left:3px solid #d97706; }
+  #autoPick { display:flex; align-items:center; gap:6px; margin-bottom:8px; font-size:12px; }
+  #autoPick label { flex:1; display:flex; align-items:center; gap:4px; }
+  #autoPick input[type=number] { padding:2px 4px; font-size:12px; }
+  #autoPick button { width:auto; padding:4px 10px; font-size:12px; margin-top:0; }
   #tripStats { font-size:12px; color:#444; margin:6px 0; }
   #trip button { background:#d97706; }
   #trip button.gmaps { background:#1a73e8; margin-top:4px; }
@@ -141,6 +145,10 @@
     </div>
     <div id="trip">
       <h2>Trip planner</h2>
+      <div id="autoPick" class="row">
+        <label>Auto-pick <input id="autoN" type="number" min="1" max="20" value="5" style="width:48px;"> shops closest to route</label>
+        <button id="autoPickBtn" class="secondary" disabled>Auto-pick</button>
+      </div>
       <div id="tripStops"></div>
       <div id="tripStats"></div>
       <button id="planBtn" disabled>Plan optimised trip</button>
@@ -332,22 +340,24 @@ function renderTripPanel() {
   const stops = document.getElementById('tripStops');
   const planBtn = document.getElementById('planBtn');
   const gmapsBtn = document.getElementById('gmapsBtn');
+  const clearBtn = document.getElementById('clearTripBtn');
+  const autoBtn = document.getElementById('autoPickBtn');
   const note = document.getElementById('gmapsNote');
+  const hasRoute = !!endpoints && hits.length > 0;
+
+  panel.style.display = hasRoute ? 'block' : 'none';
+  autoBtn.disabled = !hasRoute;
   stops.innerHTML = '';
-  if (!selected.length) {
-    panel.style.display = 'none';
-    lastOrdered = null;
-    return;
-  }
-  panel.style.display = 'block';
+  if (!selected.length) lastOrdered = null;
   selected.forEach((s, i) => {
     const d = document.createElement('div');
     d.className = 'trip-stop';
     d.textContent = `${i+1}. ${s.n}`;
     stops.appendChild(d);
   });
-  planBtn.disabled = !endpoints;
+  planBtn.disabled = !endpoints || !selected.length;
   gmapsBtn.disabled = !endpoints || !selected.length;
+  clearBtn.disabled = !selected.length;
   note.textContent = selected.length > 9
     ? `Google Maps allows max 9 stops — first 9 will be used (${selected.length - 9} dropped).`
     : '';
@@ -575,6 +585,22 @@ document.getElementById('clearTripBtn').addEventListener('click', () => {
   if (tripLayer) { map.removeLayer(tripLayer); tripLayer = null; }
   document.getElementById('tripStats').textContent = '';
   renderShopList();
+});
+
+document.getElementById('autoPickBtn').addEventListener('click', () => {
+  const nInput = document.getElementById('autoN');
+  let n = parseInt(nInput.value, 10);
+  if (!Number.isFinite(n) || n < 1) n = 1;
+  if (n > 20) n = 20;
+  nInput.value = n;
+  const candidates = filteredHits(); // already sorted by detour distance
+  if (!candidates.length) { status('No shops match current filters.'); return; }
+  selected = candidates.slice(0, n);
+  lastOrdered = null;
+  if (tripLayer) { map.removeLayer(tripLayer); tripLayer = null; }
+  document.getElementById('tripStats').textContent = '';
+  renderShopList();
+  status(`Auto-picked ${selected.length} shop${selected.length===1?'':'s'} closest to route.`);
 });
 
 // PWA: register service worker + surface an Install button when the browser offers it.
