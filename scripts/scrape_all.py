@@ -38,6 +38,39 @@ def http_get(url, retries=2, timeout=20):
 
 # ----- Vinnies -----
 
+def vinnies_hours(opening_hours):
+    """openingHours was {openingTimes: [{weekday, isScheduled, ...}]} until Sept 2026;
+    it is now a flat list with renamed fields and HH:MM:SS times. Accept both."""
+    times = opening_hours if isinstance(opening_hours, list) else ((opening_hours or {}).get('openingTimes') or [])
+    hours = {}
+    for t in times:
+        wd = (t.get('name') or t.get('weekday') or '').lower()[:3]
+        scheduled = t.get('scheduled', t.get('isScheduled'))
+        if wd and scheduled and t.get('open') and t.get('close'):
+            hours[wd] = {'o': t['open'][:5], 'c': t['close'][:5]}
+    return hours
+
+
+def parse_vinnies_page(html):
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+    if not m: return None
+    p = json.loads(m.group(1))['props']['pageProps']['pageData']
+    coords = ((p.get('location') or {}).get('address') or {}).get('coordinates') or {}
+    lat, lng = coords.get('lat'), coords.get('lng')
+    if lat is None or lng is None: return None
+    return {
+        'name': p.get('shopName') or p.get('name') or 'Vinnies',
+        'operator': 'Vinnies', 'chain': 'vinnies',
+        'lat': round(float(lat), 6), 'lon': round(float(lng), 6),
+        'address': p.get('addressLineOne', '') or '',
+        'suburb': p.get('addressSuburb', '') or '',
+        'state': p.get('addressState', '') or '',
+        'postcode': p.get('addressPostcode', '') or '',
+        'phone': p.get('phoneNumber', '') or '',
+        'hours': vinnies_hours(p.get('openingHours')), 'source': 'vinnies',
+    }
+
+
 def scrape_vinnies():
     print('Vinnies: sitemap...', flush=True)
     txt = http_get('https://www.vinnies.org.au/sitemap.xml', timeout=30)
@@ -46,32 +79,7 @@ def scrape_vinnies():
 
     def one(url):
         h = http_get(url)
-        if not h: return None
-        m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', h, re.DOTALL)
-        if not m: return None
-        try:
-            p = json.loads(m.group(1))['props']['pageProps']['pageData']
-        except Exception:
-            return None
-        coords = ((p.get('location') or {}).get('address') or {}).get('coordinates') or {}
-        lat, lng = coords.get('lat'), coords.get('lng')
-        if lat is None or lng is None: return None
-        hours = {}
-        for t in ((p.get('openingHours') or {}).get('openingTimes') or []):
-            wd = (t.get('weekday') or '').lower()[:3]
-            if t.get('isScheduled') and t.get('open') and t.get('close'):
-                hours[wd] = {'o': t['open'], 'c': t['close']}
-        return {
-            'name': p.get('shopName') or p.get('name') or 'Vinnies',
-            'operator': 'Vinnies', 'chain': 'vinnies',
-            'lat': round(float(lat), 6), 'lon': round(float(lng), 6),
-            'address': p.get('addressLineOne', '') or '',
-            'suburb': p.get('addressSuburb', '') or '',
-            'state': p.get('addressState', '') or '',
-            'postcode': p.get('addressPostcode', '') or '',
-            'phone': p.get('phoneNumber', '') or '',
-            'hours': hours, 'source': 'vinnies',
-        }
+        return parse_vinnies_page(h) if h else None
 
     return _parallel(urls, one, 'vinnies')
 
@@ -132,15 +140,23 @@ def scrape_redcross():
 
 def _parallel(urls, fn, label, workers=10):
     out = []
+    # Swallowing parse errors turned an upstream schema change into "0 valid" with no
+    # cause in the log, so errors are counted and a sample is surfaced.
+    errors = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {ex.submit(fn, u): u for u in urls}
         for i, f in enumerate(as_completed(futs), 1):
             try:
                 r = f.result()
                 if r: out.append(r)
-            except Exception: pass
+            except Exception as e:
+                errors.append(f'{futs[f]}: {type(e).__name__}: {e}')
             if i % 50 == 0 or i == len(urls):
-                print(f'  {label}: {i}/{len(urls)} ({len(out)} valid)', flush=True)
+                print(f'  {label}: {i}/{len(urls)} ({len(out)} valid, {len(errors)} errors)', flush=True)
+    if errors:
+        print(f'  {label}: {len(errors)} pages raised; first 3:', flush=True)
+        for e in errors[:3]:
+            print(f'    {e}', flush=True)
     return out
 
 

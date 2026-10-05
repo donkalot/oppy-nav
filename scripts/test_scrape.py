@@ -5,7 +5,75 @@ Run: pytest scripts/test_scrape.py
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
-from scrape_all import dist_km, dedupe, compact_records, assert_quality, MIN_COUNTS
+import json
+
+from scrape_all import (
+    dist_km, dedupe, compact_records, assert_quality, MIN_COUNTS,
+    vinnies_hours, parse_vinnies_page,
+)
+
+
+# ----- vinnies_hours -----
+
+def test_vinnies_hours_current_list_schema():
+    """Sept 2026 shape: flat list, 'name'/'scheduled', HH:MM:SS."""
+    oh = [
+        {'name': 'Monday', 'scheduled': True, 'open': '09:00:00', 'close': '17:00:00'},
+        {'name': 'Sunday', 'scheduled': False, 'open': '10:00:00', 'close': '14:00:00'},
+    ]
+    assert vinnies_hours(oh) == {'mon': {'o': '09:00', 'c': '17:00'}}
+
+
+def test_vinnies_hours_legacy_dict_schema():
+    oh = {'openingTimes': [
+        {'weekday': 'Tuesday', 'isScheduled': True, 'open': '08:30', 'close': '16:30'},
+    ]}
+    assert vinnies_hours(oh) == {'tue': {'o': '08:30', 'c': '16:30'}}
+
+
+def test_vinnies_hours_empty():
+    assert vinnies_hours(None) == {}
+    assert vinnies_hours([]) == {}
+
+
+def test_vinnies_hours_skips_unscheduled_and_missing_times():
+    oh = [
+        {'name': 'Monday', 'scheduled': True, 'open': None, 'close': '17:00:00'},
+        {'name': 'Tuesday', 'scheduled': False, 'open': '09:00:00', 'close': '17:00:00'},
+    ]
+    assert vinnies_hours(oh) == {}
+
+
+# ----- parse_vinnies_page -----
+
+def _page(page_data):
+    return ('<html><script id="__NEXT_DATA__" type="application/json">'
+            + json.dumps({'props': {'pageProps': {'pageData': page_data}}})
+            + '</script></html>')
+
+
+def test_parse_vinnies_page_current_schema():
+    html = _page({
+        'shopName': 'Vinnies Bega',
+        'phoneNumber': '(02) 6234 7485',
+        'addressLineOne': '130 Gipps St', 'addressSuburb': 'Bega',
+        'addressState': 'NSW', 'addressPostcode': '2550',
+        'location': {'address': {'coordinates': {'lat': -36.677907, 'lng': 149.842829}}},
+        'openingHours': [{'name': 'Monday', 'scheduled': True, 'open': '09:00:00', 'close': '16:30:00'}],
+    })
+    r = parse_vinnies_page(html)
+    assert r['name'] == 'Vinnies Bega'
+    assert (r['lat'], r['lon']) == (-36.677907, 149.842829)
+    assert r['suburb'] == 'Bega'
+    assert r['hours'] == {'mon': {'o': '09:00', 'c': '16:30'}}
+
+
+def test_parse_vinnies_page_no_coords_returns_none():
+    assert parse_vinnies_page(_page({'shopName': 'X', 'location': {}})) is None
+
+
+def test_parse_vinnies_page_no_next_data_returns_none():
+    assert parse_vinnies_page('<html>nothing here</html>') is None
 
 
 # ----- dist_km -----
