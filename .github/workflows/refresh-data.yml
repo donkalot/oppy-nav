@@ -38,3 +38,36 @@ jobs:
             git commit -m "chore: weekly data refresh"
             git push
           fi
+
+  # A silent red cron is how a scraper break went unnoticed for four weeks. File an
+  # issue on failure so it lands somewhere that gets read; reuse one issue per
+  # outage rather than opening a fresh one every Sunday.
+  notify:
+    needs: refresh
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          existing=$(gh issue list --repo "$REPO" --state open --label data-refresh-failure \
+            --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" \
+              --body "Weekly refresh failed again: $RUN_URL"
+          else
+            gh label create data-refresh-failure --repo "$REPO" \
+              --color B60205 --description "Weekly data refresh is failing" 2>/dev/null || true
+            gh issue create --repo "$REPO" --label data-refresh-failure \
+              --title "Weekly data refresh is failing" \
+              --body "The scheduled refresh failed. Data on the site is now stale and will stay stale until this is fixed.
+
+Run: $RUN_URL
+
+Most likely cause is an upstream schema change in one of the scrapers — check the \`By source\` line and the per-source error samples in the log."
+          fi

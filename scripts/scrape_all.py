@@ -178,11 +178,18 @@ def fetch_salvos_addresses():
     }'''
     out = []
     after = None
+    seen_cursors = set()
     while True:
         req = urllib.request.Request(url, data=json.dumps({'query': query, 'variables': {'first': 100, 'after': after}}).encode(), headers={'Content-Type':'application/json','User-Agent':UA})
         with urllib.request.urlopen(req, timeout=30) as r:
             d = json.load(r)
-        conn = d['data']['warehouses']
+        # A GraphQL schema change returns 200 with data:null and an errors array, which
+        # would otherwise surface as an opaque TypeError on the next subscript.
+        if d.get('errors'):
+            raise RuntimeError(f'Salvos GraphQL errors: {json.dumps(d["errors"])[:500]}')
+        conn = ((d.get('data') or {}).get('warehouses'))
+        if conn is None:
+            raise RuntimeError(f'Salvos GraphQL: no warehouses in response; keys={list(d.keys())}')
         for e in conn['edges']:
             n = e['node']
             a = n['address'] or {}
@@ -194,6 +201,11 @@ def fetch_salvos_addresses():
             })
         if not conn['pageInfo']['hasNextPage']: break
         after = conn['pageInfo']['endCursor']
+        # A cursor that stops advancing would otherwise page forever until the job
+        # hits its 45-minute wall with no explanation.
+        if after in seen_cursors:
+            raise RuntimeError(f'Salvos GraphQL: cursor {after!r} repeated — pagination stuck')
+        seen_cursors.add(after)
     print(f'  {len(out)} salvos records', flush=True)
     return out
 
@@ -351,13 +363,22 @@ MIN_COUNTS = {
     'salvos': 230,
     'osm': 600,
     'total_kept': 1400,
+    # Counts alone can't catch a break in the hours sub-schema: coords still parse,
+    # every threshold passes, and the app ships with a dead "Open now" filter.
+    'with_hours': 350,
 }
 
 
-def assert_quality(by_source, total_kept):
+def assert_quality(by_source, total_kept, with_hours=None):
+    counts = dict(by_source)
+    counts['total_kept'] = total_kept
+    if with_hours is not None:
+        counts['with_hours'] = with_hours
     problems = []
     for k, threshold in MIN_COUNTS.items():
-        actual = total_kept if k == 'total_kept' else by_source.get(k, 0)
+        if k == 'with_hours' and with_hours is None:
+            continue
+        actual = counts.get(k, 0)
         if actual < threshold:
             problems.append(f'{k}: got {actual}, expected >= {threshold}')
     if problems:
@@ -414,7 +435,7 @@ def main():
     print(f'Dedupe: {len(deduped)} kept, {len(all_shops)-len(deduped)} dropped', flush=True)
     print(f'By source: {by_source} · with hours: {with_hours}', flush=True)
 
-    assert_quality(by_source, len(deduped))
+    assert_quality(by_source, len(deduped), with_hours)
     rebuild_html(compact_records(deduped))
 
 

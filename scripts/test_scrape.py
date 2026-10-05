@@ -226,3 +226,18 @@ def test_quality_fails_when_total_low(capsys):
     with pytest.raises(SystemExit):
         assert_quality(by_source, 500)
     assert 'total_kept' in capsys.readouterr().err
+
+
+def test_quality_fails_when_hours_vanish(capsys):
+    """Counts can all pass while the hours sub-schema is broken — the 'Open now'
+    filter would silently match nothing. That must fail the run."""
+    import pytest
+    by_source = {'vinnies': 452, 'redcross': 178, 'salvos': 315, 'osm': 743}
+    with pytest.raises(SystemExit):
+        assert_quality(by_source, 1688, with_hours=0)
+    assert 'with_hours' in capsys.readouterr().err
+
+
+def test_quality_passes_with_healthy_hours():
+    by_source = {'vinnies': 452, 'redcross': 178, 'salvos': 315, 'osm': 743}
+    assert_quality(by_source, 1688, with_hours=449)
