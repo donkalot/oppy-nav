@@ -217,29 +217,46 @@ const CHAIN_LABELS = {
 
 function status(msg) { document.getElementById('status').textContent = msg; }
 
+// Nominatim and the OSRM demo server are free shared endpoints that throttle under
+// load. They answer with HTML or plain text, so calling .json() on a bad response
+// surfaces "Unexpected token '<'" — which reads as a broken app rather than a busy
+// service. Name the service and invite a retry instead.
+async function getJSON(url, service, opts) {
+  let r;
+  try {
+    r = await fetch(url, opts);
+  } catch (e) {
+    throw new Error(`Can't reach ${service}. Check your connection and try again.`);
+  }
+  if (r.status === 429) throw new Error(`${service} is rate-limiting us. Wait a moment and try again.`);
+  if (!r.ok) throw new Error(`${service} is unavailable right now (${r.status}). Try again shortly.`);
+  try {
+    return await r.json();
+  } catch (e) {
+    throw new Error(`${service} returned an unreadable response. Try again shortly.`);
+  }
+}
+
 async function geocode(q) {
   const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`;
-  const r = await fetch(url, { headers: { 'Accept-Language': 'en-AU' }});
-  const j = await r.json();
-  if (!j.length) throw new Error(`Could not geocode: ${q}`);
+  const j = await getJSON(url, 'The address lookup service', { headers: { 'Accept-Language': 'en-AU' }});
+  if (!j.length) throw new Error(`Could not find a place called "${q}". Try adding a state, e.g. "Bendigo, VIC".`);
   return { lat: parseFloat(j[0].lat), lon: parseFloat(j[0].lon) };
 }
 
 async function fetchRoute(coords) {
   const path = coords.map(c => `${c.lon},${c.lat}`).join(';');
   const url = `https://router.project-osrm.org/route/v1/driving/${path}?overview=full&geometries=geojson`;
-  const r = await fetch(url);
-  const j = await r.json();
-  if (!j.routes || !j.routes.length) throw new Error('No route found');
+  const j = await getJSON(url, 'The routing service');
+  if (!j.routes || !j.routes.length) throw new Error('No driving route found between those two places.');
   return j.routes[0];
 }
 
 async function fetchTrip(coords) {
   const path = coords.map(c => `${c.lon},${c.lat}`).join(';');
   const url = `https://router.project-osrm.org/trip/v1/driving/${path}?source=first&destination=last&roundtrip=false&overview=full&geometries=geojson`;
-  const r = await fetch(url);
-  const j = await r.json();
-  if (!j.trips || !j.trips.length) throw new Error('No trip found');
+  const j = await getJSON(url, 'The routing service');
+  if (!j.trips || !j.trips.length) throw new Error('Could not plan a trip through those stops.');
   return { trip: j.trips[0], waypoints: j.waypoints };
 }
 
