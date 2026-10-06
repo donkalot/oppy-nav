@@ -444,7 +444,10 @@ MIN_COUNTS = {
     'total_kept': 1400,
     # Counts alone can't catch a break in the hours sub-schema: coords still parse,
     # every threshold passes, and the app ships with a dead "Open now" filter.
-    'with_hours': 350,
+    # 711 at 2026-10-06, of which ~335 come from OSM tags. Set below the Vinnies-only
+    # floor so losing the OSM tags or the dedupe merge fails the run rather than
+    # quietly halving coverage.
+    'with_hours': 530,
 }
 
 

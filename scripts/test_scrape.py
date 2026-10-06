@@ -327,6 +327,16 @@ def test_quality_fails_when_hours_vanish(capsys):
     assert 'with_hours' in capsys.readouterr().err
 
 
+def test_quality_fails_when_osm_hours_stop_arriving(capsys):
+    """Losing the OSM tags or the dedupe merge still leaves the Vinnies-only hours
+    well above zero, so the guard has to sit above that floor to notice."""
+    import pytest
+    by_source = {'vinnies': 452, 'redcross': 178, 'salvos': 315, 'osm': 788}
+    with pytest.raises(SystemExit):
+        assert_quality(by_source, 1733, with_hours=375)
+    assert 'with_hours' in capsys.readouterr().err
+
+
 def test_quality_passes_with_healthy_hours():
-    by_source = {'vinnies': 452, 'redcross': 178, 'salvos': 315, 'osm': 743}
-    assert_quality(by_source, 1688, with_hours=449)
+    by_source = {'vinnies': 452, 'redcross': 178, 'salvos': 315, 'osm': 788}
+    assert_quality(by_source, 1733, with_hours=711)
