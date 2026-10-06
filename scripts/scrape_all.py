@@ -47,7 +47,11 @@ def vinnies_hours(opening_hours):
         wd = (t.get('name') or t.get('weekday') or '').lower()[:3]
         scheduled = t.get('scheduled', t.get('isScheduled'))
         if wd and scheduled and t.get('open') and t.get('close'):
-            hours[wd] = {'o': t['open'][:5], 'c': t['close'][:5]}
+            o, c = t['open'][:5], t['close'][:5]
+            # A couple of shops carry a PM close tagged as AM ("09:00-05:00"). Showing
+            # one as open at 3am is worse than showing no hours for that day.
+            if c > o:
+                hours[wd] = {'o': o, 'c': c}
     return hours
 
 
@@ -270,9 +274,75 @@ def geocode_salvos(records, cache_path):
 
 # ----- OSM -----
 
+OSM_DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
+OSM_DAY_INDEX = {'mo': 0, 'tu': 1, 'we': 2, 'th': 3, 'fr': 4, 'sa': 5, 'su': 6}
+
+
+def parse_osm_hours(spec):
+    """Parse the subset of OSM opening_hours syntax that AU charity shops actually use.
+
+    Returns the same {'mon': {'o','c'}} shape the app consumes. Anything with no
+    plain weekday/time rule — 24/7, month ranges, PH-only, sunrise — yields {} so a
+    shop is simply treated as having unknown hours rather than wrong ones.
+    """
+    if not spec:
+        return {}
+    hours = {}
+    # ';' always separates rules. ',' is overloaded: a day list ("Mo,Tu 10:00-14:00")
+    # or a rule separator ("We-Fr 09:30-16:00, Sa 09:30-14:30"). Only split on a comma
+    # that is followed by something introducing a fresh day spec plus its own time.
+    # A day list is bare days ("Mo,Tu,Th") with no time between them, so only split
+    # where the text before the next comma already contains a time span.
+    chunks = []
+    for part in spec.split(';'):
+        chunks.extend(re.split(r'(?<=\d:\d\d),(?=\s*(?:Mo|Tu|We|Th|Fr|Sa|Su|PH|SH)\b)', part, flags=re.I))
+    for chunk in chunks:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        # Holiday rules describe exceptions, not a weekly pattern.
+        if re.search(r'\b(PH|SH)\b', chunk):
+            continue
+        # The day spec may contain spaces after commas, e.g. "Mo-Fr, Su 09:00-17:00".
+        m = re.match(r'^((?:[A-Za-z]{2}(?:\s*-\s*[A-Za-z]{2})?)(?:\s*,\s*[A-Za-z]{2}(?:\s*-\s*[A-Za-z]{2})?)*)\s*(.*)$', chunk)
+        if not m:
+            continue
+        dayspec, rest = m.group(1), m.group(2).strip()
+        days = []
+        for token in dayspec.rstrip(',').split(','):
+            token = token.strip().lower()
+            rng = re.match(r'^([a-z]{2})\s*-\s*([a-z]{2})$', token)
+            if rng and rng.group(1) in OSM_DAY_INDEX and rng.group(2) in OSM_DAY_INDEX:
+                a, b = OSM_DAY_INDEX[rng.group(1)], OSM_DAY_INDEX[rng.group(2)]
+                # Ranges may wrap, e.g. Sa-Su or Fr-Mo.
+                days.extend(OSM_DAYS[a:b + 1] if a <= b else OSM_DAYS[a:] + OSM_DAYS[:b + 1])
+            elif token[:2] in OSM_DAY_INDEX and len(token) <= 2:
+                days.append(OSM_DAYS[OSM_DAY_INDEX[token[:2]]])
+        if not days:
+            continue
+        # "off"/"closed" means explicitly shut; drop any span claimed earlier.
+        if re.match(r'^(off|closed)$', rest, re.I):
+            for d in days:
+                hours.pop(d, None)
+            continue
+        t = re.match(r'^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})', rest)
+        if not t:
+            continue
+        o = f'{int(t.group(1)):02d}:{t.group(2)}'
+        c = f'{int(t.group(3)):02d}:{t.group(4)}'
+        # A close at or before the open means a mis-tagged PM time upstream (a few AU
+        # shops carry "09:00-04:45"). Showing such a shop as open at 2am is worse than
+        # showing no hours, so skip it.
+        if c <= o:
+            continue
+        for d in days:
+            hours[d] = {'o': o, 'c': c}
+    return hours
+
+
 def fetch_osm():
     print('OSM: overpass...', flush=True)
-    q = '[out:json][timeout:120];area["ISO3166-1"="AU"][admin_level=2]->.au;nwr["shop"="charity"](area.au);out center;'
+    q = '[out:json][timeout:120];area["ISO3166-1"="AU"][admin_level=2]->.au;nwr["shop"="charity"](area.au);out center tags;'
     endpoints = [
         'https://overpass.kumi.systems/api/interpreter',
         'https://overpass-api.de/api/interpreter',
@@ -308,7 +378,7 @@ def fetch_osm():
             'lat': round(float(lat), 6), 'lon': round(float(lon), 6),
             'address': '', 'suburb': '', 'state': tags.get('addr:state', ''),
             'postcode': tags.get('addr:postcode', ''), 'phone': tags.get('phone', ''),
-            'hours': {}, 'source': 'osm',
+            'hours': parse_osm_hours(tags.get('opening_hours')), 'source': 'osm',
         })
     print(f'OSM: {len(shops)} shops', flush=True)
     return shops
@@ -331,7 +401,7 @@ def dedupe(shops):
     kept = []
     for s in shops:
         bk = (round(s['lat']*100), round(s['lon']*100))
-        dup = False
+        match = None
         for dy in (-2,-1,0,1,2):
             for dx in (-2,-1,0,1,2):
                 for k in buckets.get((bk[0]+dy, bk[1]+dx), []):
@@ -339,17 +409,26 @@ def dedupe(shops):
                     radius = 0.30 if (s['source'] == 'salvos' or k['source'] == 'salvos') else 0.15
                     if d < radius:
                         if s['chain'] == k['chain'] and s['chain'] != 'independent':
-                            dup = True; break
+                            match = k; break
                         if s['source'] == 'osm' and k['source'] in ('vinnies','redcross','salvos'):
                             hay = (s['name'] + ' ' + s['operator']).lower()
-                            if k['chain'] == 'vinnies' and ('vinn' in hay or 'vincent' in hay): dup = True; break
-                            if k['chain'] == 'redcross' and 'red cross' in hay: dup = True; break
-                            if k['chain'] == 'salvos' and ('salv' in hay or 'salvation' in hay): dup = True; break
-                if dup: break
-            if dup: break
-        if not dup:
-            kept.append(s)
-            buckets.setdefault(bk, []).append(s)
+                            if k['chain'] == 'vinnies' and ('vinn' in hay or 'vincent' in hay): match = k; break
+                            if k['chain'] == 'redcross' and 'red cross' in hay: match = k; break
+                            if k['chain'] == 'salvos' and ('salv' in hay or 'salvation' in hay): match = k; break
+                if match: break
+            if match: break
+        if match:
+            # Red Cross and Salvos publish no hours at all, so the OSM twin being
+            # dropped here is often the only record that knows when the shop is open.
+            # Keep the winner's identity, inherit the detail it lacks.
+            if s.get('hours') and not match.get('hours'):
+                match['hours'] = s['hours']
+            for field in ('phone', 'postcode', 'state'):
+                if s.get(field) and not match.get(field):
+                    match[field] = s[field]
+            continue
+        kept.append(s)
+        buckets.setdefault(bk, []).append(s)
     return kept
 
 

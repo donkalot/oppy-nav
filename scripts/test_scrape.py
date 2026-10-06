@@ -9,8 +9,87 @@ import json
 
 from scrape_all import (
     dist_km, dedupe, compact_records, assert_quality, MIN_COUNTS,
-    vinnies_hours, parse_vinnies_page,
+    vinnies_hours, parse_vinnies_page, parse_osm_hours,
 )
+
+
+# ----- parse_osm_hours -----
+
+def _spans(spec):
+    return {d: f"{v['o']}-{v['c']}" for d, v in parse_osm_hours(spec).items()}
+
+
+def test_osm_hours_simple_range():
+    assert _spans('Mo-Fr 09:00-17:00') == {
+        'mon': '09:00-17:00', 'tue': '09:00-17:00', 'wed': '09:00-17:00',
+        'thu': '09:00-17:00', 'fri': '09:00-17:00'}
+
+
+def test_osm_hours_multiple_rules():
+    assert _spans('Mo-Fr 09:00-16:00; Sa 09:30-13:30') == {
+        'mon': '09:00-16:00', 'tue': '09:00-16:00', 'wed': '09:00-16:00',
+        'thu': '09:00-16:00', 'fri': '09:00-16:00', 'sat': '09:30-13:30'}
+
+
+def test_osm_hours_comma_is_day_list_not_rule_separator():
+    """'Mo,Tu,Th,Fr 10:00-14:00' is one rule over four days — not a rule boundary."""
+    assert _spans('Mo,Tu,Th,Fr 10:00-14:00') == {
+        'mon': '10:00-14:00', 'tue': '10:00-14:00',
+        'thu': '10:00-14:00', 'fri': '10:00-14:00'}
+
+
+def test_osm_hours_comma_separating_rules():
+    assert _spans('We-Fr 09:30-16:00, Sa 09:30-14:30') == {
+        'wed': '09:30-16:00', 'thu': '09:30-16:00',
+        'fri': '09:30-16:00', 'sat': '09:30-14:30'}
+
+
+def test_osm_hours_day_list_with_space():
+    assert _spans('Mo-Fr, Su 09:00-17:00') == {
+        'mon': '09:00-17:00', 'tue': '09:00-17:00', 'wed': '09:00-17:00',
+        'thu': '09:00-17:00', 'fri': '09:00-17:00', 'sun': '09:00-17:00'}
+
+
+def test_osm_hours_off_and_closed_are_dropped():
+    assert 'sun' not in parse_osm_hours('Mo-Sa 09:00-16:50; Su closed')
+    assert _spans('Mo-Fr 10:00-16:00; Sa-Su off') == {
+        'mon': '10:00-16:00', 'tue': '10:00-16:00', 'wed': '10:00-16:00',
+        'thu': '10:00-16:00', 'fri': '10:00-16:00'}
+
+
+def test_osm_hours_off_overrides_earlier_span():
+    """A later 'off' rule must remove a day an earlier range already set."""
+    assert _spans('Mo-Su 09:00-17:00; We off') == {
+        'mon': '09:00-17:00', 'tue': '09:00-17:00', 'thu': '09:00-17:00',
+        'fri': '09:00-17:00', 'sat': '09:00-17:00', 'sun': '09:00-17:00'}
+
+
+def test_osm_hours_wrapping_range():
+    assert set(parse_osm_hours('Sa-Su 10:00-16:00')) == {'sat', 'sun'}
+    assert set(parse_osm_hours('Fr-Mo 10:00-16:00')) == {'fri', 'sat', 'sun', 'mon'}
+
+
+def test_osm_hours_holiday_rules_ignored():
+    """PH/SH describe exceptions, not the weekly pattern."""
+    assert _spans('Mo-Fr 09:00-17:00; PH off') == {
+        'mon': '09:00-17:00', 'tue': '09:00-17:00', 'wed': '09:00-17:00',
+        'thu': '09:00-17:00', 'fri': '09:00-17:00'}
+    assert parse_osm_hours('PH 10:00-14:00') == {}
+
+
+def test_osm_hours_rejects_inverted_span():
+    """Real AU data carries '09:00-04:45' (a PM time typo). Showing a shop as open
+    at 2am is worse than showing no hours."""
+    assert parse_osm_hours('Mo-Fr 09:00-04:45') == {}
+
+
+def test_osm_hours_pads_single_digit_hour():
+    assert _spans('Mo 9:00-17:00') == {'mon': '09:00-17:00'}
+
+
+def test_osm_hours_unsupported_syntax_yields_empty():
+    for spec in ('24/7', 'sunrise-sunset', 'Jan-Mar 10:00-16:00', '', None):
+        assert parse_osm_hours(spec) == {}, spec
 
 
 # ----- vinnies_hours -----
@@ -34,6 +113,16 @@ def test_vinnies_hours_legacy_dict_schema():
 def test_vinnies_hours_empty():
     assert vinnies_hours(None) == {}
     assert vinnies_hours([]) == {}
+
+
+def test_vinnies_hours_rejects_inverted_span():
+    """Real upstream data carries '09:00-05:00' (a PM close tagged as AM). Two shops
+    shipped hours claiming they were open overnight."""
+    oh = [
+        {'name': 'Monday', 'scheduled': True, 'open': '09:00:00', 'close': '05:00:00'},
+        {'name': 'Tuesday', 'scheduled': True, 'open': '09:00:00', 'close': '17:00:00'},
+    ]
+    assert vinnies_hours(oh) == {'tue': {'o': '09:00', 'c': '17:00'}}
 
 
 def test_vinnies_hours_skips_unscheduled_and_missing_times():
