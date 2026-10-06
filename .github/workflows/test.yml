@@ -7,6 +7,14 @@ on:
   workflow_dispatch:
 
 jobs:
+  # An unparseable workflow fails instantly with "workflow file issue" and never runs
+  # a step, so the refresh had no chance of working for a week without this check.
+  workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -c "import yaml,glob,sys; [yaml.safe_load(open(f)) for f in glob.glob('.github/workflows/*.yml')]"
+
   unit:
     runs-on: ubuntu-latest
     steps:

@@ -63,11 +63,10 @@ jobs:
           else
             gh label create data-refresh-failure --repo "$REPO" \
               --color B60205 --description "Weekly data refresh is failing" 2>/dev/null || true
+            body=$(printf '%s\n\n%s\n\n%s\n' \
+              "The scheduled refresh failed. Data on the site is now stale and will stay stale until this is fixed." \
+              "Run: $RUN_URL" \
+              "Most likely cause is an upstream schema change in one of the scrapers - check the \`By source\` line and the per-source error samples in the log.")
             gh issue create --repo "$REPO" --label data-refresh-failure \
-              --title "Weekly data refresh is failing" \
-              --body "The scheduled refresh failed. Data on the site is now stale and will stay stale until this is fixed.
-
-Run: $RUN_URL
-
-Most likely cause is an upstream schema change in one of the scrapers — check the \`By source\` line and the per-source error samples in the log."
+              --title "Weekly data refresh is failing" --body "$body"
           fi
