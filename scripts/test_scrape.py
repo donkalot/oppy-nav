@@ -10,7 +10,7 @@ import json
 from scrape_all import (
     dist_km, dedupe, compact_records, assert_quality, MIN_COUNTS,
     vinnies_hours, parse_vinnies_page, parse_osm_hours,
-    redcross_hours, parse_redcross_page,
+    redcross_hours, parse_redcross_page, salvos_street_variants,
 )
 
 
@@ -164,6 +164,48 @@ def test_parse_vinnies_page_no_coords_returns_none():
 
 def test_parse_vinnies_page_no_next_data_returns_none():
     assert parse_vinnies_page('<html>nothing here</html>') is None
+
+
+# ----- salvos_street_variants -----
+# Streets taken from the 155 upstream Salvos records Nominatim could not resolve.
+
+def test_salvos_variants_try_original_first():
+    """A plain street must be queried unchanged — stripping is a fallback, never the
+    first guess, or a real street number could be mistaken for a unit number."""
+    assert salvos_street_variants('192 Lava Street')[0] == '192 Lava Street'
+
+
+def test_salvos_variants_strip_shop_comma():
+    assert '60 Mill Street' in salvos_street_variants('Shop 1, 60 Mill Street')
+
+
+def test_salvos_variants_strip_shop_slash():
+    assert '130 High Street' in salvos_street_variants('Shop 16/130 High Street')
+
+
+def test_salvos_variants_strip_bare_unit_slash():
+    assert '308 Kororoit Creek' in salvos_street_variants('1&2/308 Kororoit Creek')
+
+
+def test_salvos_variants_strip_tenancy_code():
+    assert '322 Hale Road' in salvos_street_variants('T3-5 / 322 Hale Road')
+
+
+def test_salvos_variants_strip_unit_comma():
+    assert '10 - 16  Medcalf Street' in salvos_street_variants('Unit 2, 10 - 16  Medcalf Street')
+
+
+def test_salvos_variants_are_unique_and_nonempty():
+    for street in ('192 Lava Street', 'Shop 1, 60 Mill Street', '', None):
+        v = salvos_street_variants(street)
+        assert len(v) == len(set(v))
+        assert all(s.strip() for s in v)
+
+
+def test_salvos_variants_empty_street_yields_nothing():
+    """An empty street must not produce a bare ', Australia' query."""
+    assert salvos_street_variants('') == []
+    assert salvos_street_variants(None) == []
 
 
 # ----- redcross_hours -----
@@ -382,26 +424,39 @@ def test_compact_keeps_hours():
 
 
 # ----- assert_quality -----
+# The live run on 2026-10-07. Every case below perturbs one field of this baseline,
+# so retuning a threshold doesn't need nine literals edited in lockstep.
+OK = {'vinnies': 452, 'redcross': 178, 'salvos': 463, 'osm': 763}
+OK_TOTAL, OK_HOURS, OK_ADDR = 1856, 854, 1365
+
 
 def test_quality_passes_at_baseline():
-    by_source = {'vinnies': 453, 'redcross': 177, 'salvos': 310, 'osm': 757}
-    assert_quality(by_source, 1697)  # should not raise / exit
+    assert_quality(OK, OK_TOTAL, with_hours=OK_HOURS, with_address=OK_ADDR)
 
 
 def test_quality_fails_when_vinnies_missing(capsys):
     import pytest
-    by_source = {'vinnies': 10, 'redcross': 177, 'salvos': 310, 'osm': 757}
     with pytest.raises(SystemExit):
-        assert_quality(by_source, 1697)
+        assert_quality({**OK, 'vinnies': 10}, OK_TOTAL,
+                       with_hours=OK_HOURS, with_address=OK_ADDR)
+    assert 'vinnies' in capsys.readouterr().err
+
+
+def test_quality_fails_when_salvos_geocode_regresses(capsys):
+    """Street-only geocoding placed 317 of 472 Salvos records and silently dropped the
+    rest. That must not read as a healthy run."""
+    import pytest
+    with pytest.raises(SystemExit):
+        assert_quality({**OK, 'salvos': 317}, 1710,
+                       with_hours=OK_HOURS, with_address=1219)
     err = capsys.readouterr().err
-    assert 'vinnies' in err
+    assert 'salvos' in err
 
 
 def test_quality_fails_when_total_low(capsys):
     import pytest
-    by_source = {'vinnies': 400, 'redcross': 150, 'salvos': 280, 'osm': 700}
     with pytest.raises(SystemExit):
-        assert_quality(by_source, 500)
+        assert_quality({'vinnies': 400, 'redcross': 150, 'salvos': 420, 'osm': 700}, 500)
     assert 'total_kept' in capsys.readouterr().err
 
 
@@ -409,9 +464,8 @@ def test_quality_fails_when_hours_vanish(capsys):
     """Counts can all pass while the hours sub-schema is broken — the 'Open now'
     filter would silently match nothing. That must fail the run."""
     import pytest
-    by_source = {'vinnies': 452, 'redcross': 178, 'salvos': 315, 'osm': 743}
     with pytest.raises(SystemExit):
-        assert_quality(by_source, 1688, with_hours=0)
+        assert_quality(OK, OK_TOTAL, with_hours=0, with_address=OK_ADDR)
     assert 'with_hours' in capsys.readouterr().err
 
 
@@ -419,44 +473,39 @@ def test_quality_fails_when_osm_hours_stop_arriving(capsys):
     """Losing the OSM tags or the dedupe merge still leaves the Vinnies-only hours
     well above zero, so the guard has to sit above that floor to notice."""
     import pytest
-    by_source = {'vinnies': 452, 'redcross': 178, 'salvos': 315, 'osm': 788}
     with pytest.raises(SystemExit):
-        assert_quality(by_source, 1733, with_hours=375)
+        assert_quality(OK, OK_TOTAL, with_hours=375, with_address=OK_ADDR)
     assert 'with_hours' in capsys.readouterr().err
-
-
-def test_quality_passes_with_healthy_hours():
-    by_source = {'vinnies': 452, 'redcross': 178, 'salvos': 315, 'osm': 788}
-    assert_quality(by_source, 1733, with_hours=711)
 
 
 def test_quality_fails_when_addresses_vanish(capsys):
     """The measured state before the Oct 2026 parser fixes: every shop count passes
     while 695 of 1733 shops render a name and nothing else."""
     import pytest
-    by_source = {'vinnies': 452, 'redcross': 178, 'salvos': 315, 'osm': 788}
     with pytest.raises(SystemExit):
-        assert_quality(by_source, 1733, with_hours=711, with_address=767)
+        assert_quality(OK, OK_TOTAL, with_hours=OK_HOURS, with_address=767)
     assert 'with_address' in capsys.readouterr().err
 
 
 def test_quality_fails_when_one_source_loses_addresses(capsys):
-    """Losing just the Red Cross blob again leaves ~1049 — the guard has to sit above
+    """Losing just the Red Cross blob again leaves ~1187 — the guard has to sit above
     that, not merely above zero."""
     import pytest
-    by_source = {'vinnies': 452, 'redcross': 178, 'salvos': 315, 'osm': 788}
     with pytest.raises(SystemExit):
-        assert_quality(by_source, 1733, with_hours=685, with_address=1049)
+        assert_quality(OK, OK_TOTAL, with_hours=685, with_address=1187)
     err = capsys.readouterr().err
     assert 'with_address' in err and 'with_hours' in err
 
 
-def test_quality_passes_with_healthy_addresses():
-    by_source = {'vinnies': 452, 'redcross': 178, 'salvos': 315, 'osm': 788}
-    assert_quality(by_source, 1733, with_hours=854, with_address=1227)
-
-
 def test_quality_skips_optional_checks_when_not_supplied():
     """Callers that don't measure a field must not trip its guard."""
-    by_source = {'vinnies': 453, 'redcross': 177, 'salvos': 310, 'osm': 757}
-    assert_quality(by_source, 1697)
+    assert_quality(OK, OK_TOTAL)
+
+
+def test_quality_baseline_clears_every_threshold_with_margin():
+    """A floor set at or above the live value is a guard that fails on the next good
+    run. Catch that at edit time rather than next Sunday."""
+    actual = {**OK, 'total_kept': OK_TOTAL,
+              'with_hours': OK_HOURS, 'with_address': OK_ADDR}
+    for k, threshold in MIN_COUNTS.items():
+        assert threshold < actual[k], f'{k}: floor {threshold} >= live {actual[k]}'

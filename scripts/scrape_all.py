@@ -252,6 +252,25 @@ def fetch_salvos_addresses():
     return out
 
 
+SALVOS_UNIT_PREFIX = re.compile(
+    r'(?i)^\s*(?:shop|unit|suite|tenancy|tnc|level|kiosk|t)\s*[\w&\-/. ]{0,12}?[,/]\s*')
+SALVOS_BARE_UNIT = re.compile(r'^\s*[\dA-Za-z&\- ]{1,10}/\s*')
+
+
+def salvos_street_variants(street):
+    """Nominatim can't resolve a shopping-centre designator: "Shop 1, 60 Mill Street"
+    and "T3-5 / 322 Hale Road" both return nothing while the bare street number
+    resolves fine. Yield the original first, then progressively stripped forms."""
+    seen = []
+    for s in (street or '',
+              SALVOS_UNIT_PREFIX.sub('', street or ''),
+              SALVOS_BARE_UNIT.sub('', SALVOS_UNIT_PREFIX.sub('', street or ''))):
+        s = s.strip()
+        if s and s not in seen:
+            seen.append(s)
+    return seen
+
+
 def geocode_salvos(records, cache_path):
     """Only geocode records whose id isn't already in the cache."""
     cache = {}
@@ -270,24 +289,43 @@ def geocode_salvos(records, cache_path):
         if not j: return None
         return float(j[0]['lat']), float(j[0]['lon'])
 
-    t0 = time.time()
-    for i, s in enumerate(todo, 1):
-        parts = [s['street'], s['city'], s['state'], s['postcode']]
-        q = ', '.join(p for p in parts if p) + ', Australia'
-        coords = None
-        for attempt in range(3):
+    def attempt(q):
+        for _ in range(3):
             try:
-                coords = geocode(q); break
+                return geocode(q)
             except Exception:
                 time.sleep(2)
+        return None
+
+    t0 = time.time()
+    approx = 0
+    for i, s in enumerate(todo, 1):
+        tail = [p for p in (s['city'], s['state'], s['postcode']) if p]
+        coords, precision = None, None
+        for street in salvos_street_variants(s['street']):
+            coords = attempt(', '.join([street] + tail) + ', Australia')
+            if coords:
+                precision = 'street'
+                break
+            time.sleep(1.05)
+        if not coords and tail:
+            # Suburb-level coords put the pin a few hundred metres out, which the app
+            # already tolerates for Salvos (dedupe uses a wider radius for this source
+            # precisely because every coord here is geocoded). Dropping the shop
+            # instead makes it invisible, which is strictly worse for a shop finder.
+            coords = attempt(', '.join(tail) + ', Australia')
+            if coords:
+                precision, approx = 'suburb', approx + 1
         rec = dict(cache.get(s['id'], s))
         rec.update(s)
         if coords:
             rec['lat'], rec['lon'] = coords
+            rec['precision'] = precision
         cache[s['id']] = rec
         if i % 25 == 0 or i == len(todo):
             cache_path.write_text(json.dumps(list(cache.values()), ensure_ascii=False), encoding='utf-8')
-            print(f'  {i}/{len(todo)} · {sum(1 for r in cache.values() if "lat" in r)} coords total · {i/(time.time()-t0):.2f}/s', flush=True)
+            print(f'  {i}/{len(todo)} · {sum(1 for r in cache.values() if "lat" in r)} coords total '
+                  f'· {approx} suburb-level · {i/(time.time()-t0):.2f}/s', flush=True)
         time.sleep(1.05)
 
     # Drop cached ids no longer in the current warehouse list
@@ -306,7 +344,10 @@ def geocode_salvos(records, cache_path):
             'address': r['street'], 'suburb': r['city'], 'state': r['state'],
             'postcode': str(r['postcode']), 'phone': r['phone'],
             'hours': {}, 'source': 'salvos',
+            'approx': r.get('precision') == 'suburb',
         })
+    print(f'Salvos: {len(out)} of {len(records)} upstream records placed '
+          f'({sum(1 for r in out if r["approx"])} suburb-level)', flush=True)
     return out
 
 
@@ -503,9 +544,12 @@ def dedupe(shops):
 MIN_COUNTS = {
     'vinnies': 350,
     'redcross': 130,
-    'salvos': 230,
+    # 463 at 2026-10-07, after the three-tier geocode recovered 154 records the
+    # single-tier version silently dropped. Floor raised so a regression back to
+    # street-only geocoding (317) fails instead of passing.
+    'salvos': 400,
     'osm': 600,
-    'total_kept': 1400,
+    'total_kept': 1500,
     # Counts alone can't catch a break in the hours sub-schema: coords still parse,
     # every threshold passes, and the app ships with a dead "Open now" filter.
     # 854 at 2026-10-07 (vinnies 447, redcross 169, osm 207, salvos 31). Set so that
@@ -514,10 +558,10 @@ MIN_COUNTS = {
     # Two defects hid behind the shop counts for months: Red Cross moved its store
     # details out of JSON-LD, and scrape_osm hardcoded 'address' to empty. Both left
     # the coords intact, so 695 of 1733 shops shipped a popup containing nothing but
-    # a name while every count above passed. 1227 at 2026-10-07; losing the Red Cross
-    # blob drops it to ~1049 and losing the OSM tags to ~945, so sit above both while
+    # a name while every count above passed. 1365 at 2026-10-07; losing the Red Cross
+    # blob drops it to ~1187 and losing the OSM tags to ~1093, so sit above both while
     # leaving room for ordinary OSM tagging churn.
-    'with_address': 1100,
+    'with_address': 1250,
 }
 
 
@@ -554,6 +598,7 @@ def compact_records(shops):
         if s.get('postcode'): rec['p'] = s['postcode']
         if s.get('phone'): rec['ph'] = s['phone']
         if s.get('hours'): rec['h'] = s['hours']
+        if s.get('approx'): rec['ax'] = 1
         out.append(rec)
     return out
 
