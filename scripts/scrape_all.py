@@ -90,6 +90,79 @@ def scrape_vinnies():
 
 # ----- Red Cross -----
 
+REDCROSS_DAYS = {'monday': 'mon', 'tuesday': 'tue', 'wednesday': 'wed',
+                 'thursday': 'thu', 'friday': 'fri', 'saturday': 'sat',
+                 'sunday': 'sun'}
+
+
+def redcross_hours(entries):
+    """Times arrive as bare 12-hour clock with no am/pm: a close of "5:00" is
+    17:00. Opens are morning, closes are afternoon, so push any close before the
+    open into the pm half."""
+    hours = {}
+    for e in entries if isinstance(entries, list) else []:
+        if not isinstance(e, dict) or e.get('closed'):
+            continue
+        wd = REDCROSS_DAYS.get(str(e.get('day', '')).strip().lower())
+        o, c = str(e.get('opens') or ''), str(e.get('closes') or '')
+        if not (wd and ':' in o and ':' in c):
+            continue
+
+        def hhmm(t, pm=False):
+            hh, _, mm = t.partition(':')
+            try: hh, mm = int(hh), int(mm)
+            except ValueError: return None
+            if pm and hh < 12: hh += 12
+            if not (0 <= hh < 24 and 0 <= mm < 60): return None
+            return f'{hh:02d}:{mm:02d}'
+
+        oo = hhmm(o)
+        cc = hhmm(c)
+        if oo and cc and cc <= oo:
+            cc = hhmm(c, pm=True)
+        if oo and cc and cc > oo:
+            hours[wd] = {'o': oo, 'c': cc}
+    return hours
+
+
+def parse_redcross_page(html):
+    """Store details used to be JSON-LD. Since ~Oct 2026 they are an embedded JS
+    props object with renamed keys (`locality`, not `addressLocality`), which also
+    carries opening hours the JSON-LD never had."""
+    i = html.find('"name":"LocationDetails"')
+    if i < 0:
+        return None
+    # Start past the component's own "name" key, or grab() returns
+    # "LocationDetails" as the shop name.
+    i = html.index('"props"', i) + len('"props"')
+    seg = html[i:i + 6000]
+
+    def grab(key):
+        m = re.search(r'"%s":"(.*?)(?<!\\)"' % key, seg)
+        return (m.group(1).strip() if m else '')
+
+    def coord(key, pat):
+        m = re.search(r'"%s":\s*(%s)' % (key, pat), seg)
+        return float(m.group(1)) if m else None
+
+    lat, lon = coord('latitude', r'-?\d+\.\d+'), coord('longitude', r'-?\d+\.\d+')
+    if lat is None or lon is None:
+        return None
+    hm = re.search(r'"operatingHours":\s*(\[.*?\])', seg, re.DOTALL)
+    try:
+        entries = json.loads(hm.group(1)) if hm else []
+    except Exception:
+        entries = []
+    return {
+        'name': grab('name') or 'Red Cross Shop',
+        'operator': 'Red Cross', 'chain': 'redcross',
+        'lat': round(lat, 6), 'lon': round(lon, 6),
+        'address': grab('streetAddress'), 'suburb': grab('locality'),
+        'state': grab('state'), 'postcode': grab('postalCode'),
+        'phone': grab('phone'), 'hours': redcross_hours(entries),
+    }
+
+
 def scrape_redcross():
     print('Red Cross: sitemap...', flush=True)
     txt = http_get('https://www.redcross.org.au/sitemap.xml', timeout=30)
@@ -99,45 +172,10 @@ def scrape_redcross():
     def one(url):
         h = http_get(url)
         if not h: return None
-        lat = lon = None
-        addr = suburb = state = postcode = phone = ''
-        name = 'Red Cross Shop'
-        for ld in re.findall(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', h, re.DOTALL):
-            try: obj = json.loads(ld)
-            except Exception: continue
-            for o in (obj if isinstance(obj, list) else [obj]):
-                if not isinstance(o, dict): continue
-                t = o.get('@type')
-                if isinstance(t, list): t = t[0] if t else ''
-                if t not in ('Store','LocalBusiness','Place','ClothingStore','Organization'): continue
-                name = o.get('name') or name
-                a = o.get('address') or {}
-                if isinstance(a, dict):
-                    addr = a.get('streetAddress') or addr
-                    suburb = a.get('addressLocality') or suburb
-                    state = a.get('addressRegion') or state
-                    postcode = a.get('postalCode') or postcode
-                g = o.get('geo') or {}
-                if isinstance(g, dict):
-                    try:
-                        if g.get('latitude') is not None: lat = float(g['latitude'])
-                        if g.get('longitude') is not None: lon = float(g['longitude'])
-                    except Exception: pass
-                phone = o.get('telephone') or phone
-        if lat is None:
-            m = re.search(r'"latitude"\s*:\s*"?(-?\d+\.\d+)', h)
-            if m: lat = float(m.group(1))
-        if lon is None:
-            m = re.search(r'"longitude"\s*:\s*"?(1\d+\.\d+)', h)
-            if m: lon = float(m.group(1))
-        if lat is None or lon is None: return None
-        return {
-            'name': name.strip(), 'operator': 'Red Cross', 'chain': 'redcross',
-            'lat': round(lat, 6), 'lon': round(lon, 6),
-            'address': addr, 'suburb': suburb, 'state': state,
-            'postcode': str(postcode) if postcode else '', 'phone': phone,
-            'hours': {}, 'source': 'redcross',
-        }
+        d = parse_redcross_page(h)
+        if not d: return None
+        d['source'] = 'redcross'
+        return d
 
     return _parallel(urls, one, 'redcross')
 
@@ -376,7 +414,10 @@ def fetch_osm():
         shops.append({
             'name': name, 'operator': op, 'chain': chain,
             'lat': round(float(lat), 6), 'lon': round(float(lon), 6),
-            'address': '', 'suburb': '', 'state': tags.get('addr:state', ''),
+            'address': ' '.join(v for v in (tags.get('addr:housenumber'),
+                                            tags.get('addr:street')) if v),
+            'suburb': tags.get('addr:suburb') or tags.get('addr:city', ''),
+            'state': tags.get('addr:state', ''),
             'postcode': tags.get('addr:postcode', ''), 'phone': tags.get('phone', ''),
             'hours': parse_osm_hours(tags.get('opening_hours')), 'source': 'osm',
         })
@@ -448,17 +489,23 @@ MIN_COUNTS = {
     # floor so losing the OSM tags or the dedupe merge fails the run rather than
     # quietly halving coverage.
     'with_hours': 530,
+    # Two defects hid behind the shop counts for months: Red Cross moved its store
+    # details out of JSON-LD, and scrape_osm hardcoded 'address' to empty. Both left
+    # the coords intact, so 598 of 1733 shops shipped a popup containing nothing but
+    # a name while every count above passed. Address coverage is the field that
+    # notices.
+    'with_address': 1200,
 }
 
 
-def assert_quality(by_source, total_kept, with_hours=None):
+def assert_quality(by_source, total_kept, with_hours=None, with_address=None):
     counts = dict(by_source)
     counts['total_kept'] = total_kept
-    if with_hours is not None:
-        counts['with_hours'] = with_hours
+    optional = {'with_hours': with_hours, 'with_address': with_address}
+    counts.update({k: v for k, v in optional.items() if v is not None})
     problems = []
     for k, threshold in MIN_COUNTS.items():
-        if k == 'with_hours' and with_hours is None:
+        if k in optional and optional[k] is None:
             continue
         actual = counts.get(k, 0)
         if actual < threshold:
@@ -514,10 +561,12 @@ def main():
     for s in deduped:
         by_source[s['source']] = by_source.get(s['source'], 0) + 1
     with_hours = sum(1 for s in deduped if s['hours'])
+    with_address = sum(1 for s in deduped if s.get('address'))
     print(f'Dedupe: {len(deduped)} kept, {len(all_shops)-len(deduped)} dropped', flush=True)
-    print(f'By source: {by_source} · with hours: {with_hours}', flush=True)
+    print(f'By source: {by_source} · with hours: {with_hours} '
+          f'· with address: {with_address}', flush=True)
 
-    assert_quality(by_source, len(deduped), with_hours)
+    assert_quality(by_source, len(deduped), with_hours, with_address)
     rebuild_html(compact_records(deduped))
 
 

@@ -10,6 +10,7 @@ import json
 from scrape_all import (
     dist_km, dedupe, compact_records, assert_quality, MIN_COUNTS,
     vinnies_hours, parse_vinnies_page, parse_osm_hours,
+    redcross_hours, parse_redcross_page,
 )
 
 
@@ -163,6 +164,93 @@ def test_parse_vinnies_page_no_coords_returns_none():
 
 def test_parse_vinnies_page_no_next_data_returns_none():
     assert parse_vinnies_page('<html>nothing here</html>') is None
+
+
+# ----- redcross_hours -----
+
+def test_redcross_hours_bare_12h_close_becomes_pm():
+    h = redcross_hours([{'day': 'Tuesday', 'closed': False,
+                         'opens': '9:00', 'closes': '5:00'}])
+    assert h == {'tue': {'o': '09:00', 'c': '17:00'}}
+
+
+def test_redcross_hours_already_24h_close_untouched():
+    h = redcross_hours([{'day': 'Monday', 'closed': False,
+                         'opens': '09:30', 'closes': '17:30'}])
+    assert h == {'mon': {'o': '09:30', 'c': '17:30'}}
+
+
+def test_redcross_hours_midday_close_is_not_shifted():
+    h = redcross_hours([{'day': 'Saturday', 'closed': False,
+                         'opens': '9:00', 'closes': '12:00'}])
+    assert h == {'sat': {'o': '09:00', 'c': '12:00'}}
+
+
+def test_redcross_hours_closed_day_dropped():
+    assert redcross_hours([{'day': 'Sunday', 'closed': True,
+                            'opens': '', 'closes': ''}]) == {}
+
+
+def test_redcross_hours_missing_times_dropped():
+    assert redcross_hours([{'day': 'Monday', 'closed': False,
+                            'opens': '', 'closes': ''}]) == {}
+
+
+def test_redcross_hours_unknown_day_dropped():
+    assert redcross_hours([{'day': 'Someday', 'closed': False,
+                            'opens': '9:00', 'closes': '5:00'}]) == {}
+
+
+def test_redcross_hours_junk_times_dropped():
+    assert redcross_hours([{'day': 'Monday', 'closed': False,
+                            'opens': 'ab:cd', 'closes': '5:00'}]) == {}
+
+
+def test_redcross_hours_not_a_list():
+    assert redcross_hours(None) == {}
+
+
+# ----- parse_redcross_page -----
+
+RC_PAGE = ('<html><body><script>window.__DATA={"components":[{'
+           '"name":"LocationDetails","props":{"id":"abc",'
+           '"name":"Red Cross Shop Albany","type":"retailstore",'
+           '"coordinates":{"latitude":-35.0182426,"longitude":117.88443},'
+           '"streetAddress":"Shop 2, 78 Lockyer Avenue","locality":"Albany",'
+           '"postalCode":"6330","state":"WA","phone":"08 6834 8830",'
+           '"operatingHours":[{"day":"Monday","closed":true,"opens":"","closes":""},'
+           '{"day":"Tuesday","closed":false,"opens":"9:00","closes":"5:00"}],'
+           '"paymentTypes":["Cash"]}}]}</script></body></html>')
+
+
+def test_parse_redcross_page_extracts_shop_not_component_name():
+    d = parse_redcross_page(RC_PAGE)
+    # The component's own "name":"LocationDetails" precedes the shop's name.
+    assert d['name'] == 'Red Cross Shop Albany'
+
+
+def test_parse_redcross_page_address_fields():
+    d = parse_redcross_page(RC_PAGE)
+    assert (d['address'], d['suburb'], d['state'], d['postcode']) == (
+        'Shop 2, 78 Lockyer Avenue', 'Albany', 'WA', '6330')
+    assert d['phone'] == '08 6834 8830'
+    assert (d['lat'], d['lon']) == (-35.018243, 117.88443)
+    assert d['chain'] == 'redcross'
+
+
+def test_parse_redcross_page_hours():
+    assert parse_redcross_page(RC_PAGE)['hours'] == {
+        'tue': {'o': '09:00', 'c': '17:00'}}
+
+
+def test_parse_redcross_page_no_blob_returns_none():
+    assert parse_redcross_page('<html><body>nothing here</body></html>') is None
+
+
+def test_parse_redcross_page_no_coords_returns_none():
+    assert parse_redcross_page(
+        '<html><script>{"name":"LocationDetails","props":{'
+        '"name":"X","streetAddress":"1 Test St"}}</script></html>') is None
 
 
 # ----- dist_km -----
@@ -340,3 +428,24 @@ def test_quality_fails_when_osm_hours_stop_arriving(capsys):
 def test_quality_passes_with_healthy_hours():
     by_source = {'vinnies': 452, 'redcross': 178, 'salvos': 315, 'osm': 788}
     assert_quality(by_source, 1733, with_hours=711)
+
+
+def test_quality_fails_when_addresses_vanish(capsys):
+    """The state before the Oct 2026 parser fixes: every count passes while 598 shops
+    render a name and nothing else."""
+    import pytest
+    by_source = {'vinnies': 452, 'redcross': 178, 'salvos': 315, 'osm': 788}
+    with pytest.raises(SystemExit):
+        assert_quality(by_source, 1733, with_hours=711, with_address=1135)
+    assert 'with_address' in capsys.readouterr().err
+
+
+def test_quality_passes_with_healthy_addresses():
+    by_source = {'vinnies': 452, 'redcross': 178, 'salvos': 315, 'osm': 788}
+    assert_quality(by_source, 1733, with_hours=711, with_address=1570)
+
+
+def test_quality_skips_optional_checks_when_not_supplied():
+    """Callers that don't measure a field must not trip its guard."""
+    by_source = {'vinnies': 453, 'redcross': 177, 'salvos': 310, 'osm': 757}
+    assert_quality(by_source, 1697)
