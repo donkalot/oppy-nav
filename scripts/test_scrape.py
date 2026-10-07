@@ -431,18 +431,29 @@ def test_quality_passes_with_healthy_hours():
 
 
 def test_quality_fails_when_addresses_vanish(capsys):
-    """The state before the Oct 2026 parser fixes: every count passes while 598 shops
-    render a name and nothing else."""
+    """The measured state before the Oct 2026 parser fixes: every shop count passes
+    while 695 of 1733 shops render a name and nothing else."""
     import pytest
     by_source = {'vinnies': 452, 'redcross': 178, 'salvos': 315, 'osm': 788}
     with pytest.raises(SystemExit):
-        assert_quality(by_source, 1733, with_hours=711, with_address=1135)
+        assert_quality(by_source, 1733, with_hours=711, with_address=767)
     assert 'with_address' in capsys.readouterr().err
+
+
+def test_quality_fails_when_one_source_loses_addresses(capsys):
+    """Losing just the Red Cross blob again leaves ~1049 — the guard has to sit above
+    that, not merely above zero."""
+    import pytest
+    by_source = {'vinnies': 452, 'redcross': 178, 'salvos': 315, 'osm': 788}
+    with pytest.raises(SystemExit):
+        assert_quality(by_source, 1733, with_hours=685, with_address=1049)
+    err = capsys.readouterr().err
+    assert 'with_address' in err and 'with_hours' in err
 
 
 def test_quality_passes_with_healthy_addresses():
     by_source = {'vinnies': 452, 'redcross': 178, 'salvos': 315, 'osm': 788}
-    assert_quality(by_source, 1733, with_hours=711, with_address=1570)
+    assert_quality(by_source, 1733, with_hours=854, with_address=1227)
 
 
 def test_quality_skips_optional_checks_when_not_supplied():

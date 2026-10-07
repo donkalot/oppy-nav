@@ -378,24 +378,47 @@ def parse_osm_hours(spec):
     return hours
 
 
+# 1078 charity shops at 2026-10-07. Any mirror answering with less than a third of
+# that is broken or throttling, not reporting a real collapse in the OSM data.
+OSM_MIN_ELEMENTS = 350
+
+
 def fetch_osm():
     print('OSM: overpass...', flush=True)
     q = '[out:json][timeout:120];area["ISO3166-1"="AU"][admin_level=2]->.au;nwr["shop"="charity"](area.au);out center tags;'
+    # overpass-api.de first: kumi.systems was serving a five-month-stale database on
+    # 2026-10-07 (base 2026-05-06) and answering AU-wide queries with zero elements.
     endpoints = [
-        'https://overpass.kumi.systems/api/interpreter',
         'https://overpass-api.de/api/interpreter',
+        'https://overpass.kumi.systems/api/interpreter',
         'https://overpass.private.coffee/api/interpreter',
     ]
     data = None
     for ep in endpoints:
         try:
             r = requests.post(ep, data={'data': q}, headers=HEADERS, timeout=180)
-            if r.status_code == 200:
-                data = r.json(); print(f'  fetched from {ep} ({len(data.get("elements", []))} elements)', flush=True); break
-            print(f'  {ep} -> {r.status_code}', flush=True)
+            if r.status_code != 200:
+                print(f'  {ep} -> {r.status_code}', flush=True)
+                continue
+            d = r.json()
+            n = len(d.get('elements', []))
+            # A mirror can answer 200 with an empty result set: either it is rate-limiting
+            # us (the reason arrives in "remark", not the status code) or its database is
+            # months stale. Taking that as success silently drops every OSM shop while
+            # the other mirrors sit untried.
+            if n < OSM_MIN_ELEMENTS:
+                print(f'  {ep} -> 200 but only {n} elements '
+                      f'(base {d.get("osm3s", {}).get("timestamp_osm_base")}, '
+                      f'remark {d.get("remark")!r}) — trying next mirror', flush=True)
+                continue
+            data = d
+            print(f'  fetched from {ep} ({n} elements, '
+                  f'base {d.get("osm3s", {}).get("timestamp_osm_base")})', flush=True)
+            break
         except Exception as e:
             print(f'  {ep} err: {e}', flush=True)
-    if not data: raise RuntimeError('All Overpass endpoints failed')
+    if not data:
+        raise RuntimeError('All Overpass endpoints failed or returned too few elements')
     shops = []
     for el in data.get('elements', []):
         if el['type'] == 'node':
@@ -485,16 +508,16 @@ MIN_COUNTS = {
     'total_kept': 1400,
     # Counts alone can't catch a break in the hours sub-schema: coords still parse,
     # every threshold passes, and the app ships with a dead "Open now" filter.
-    # 711 at 2026-10-06, of which ~335 come from OSM tags. Set below the Vinnies-only
-    # floor so losing the OSM tags or the dedupe merge fails the run rather than
-    # quietly halving coverage.
-    'with_hours': 530,
+    # 854 at 2026-10-07 (vinnies 447, redcross 169, osm 207, salvos 31). Set so that
+    # losing any single source's hours trips it: the largest survivable loss is salvos.
+    'with_hours': 700,
     # Two defects hid behind the shop counts for months: Red Cross moved its store
     # details out of JSON-LD, and scrape_osm hardcoded 'address' to empty. Both left
-    # the coords intact, so 598 of 1733 shops shipped a popup containing nothing but
-    # a name while every count above passed. Address coverage is the field that
-    # notices.
-    'with_address': 1200,
+    # the coords intact, so 695 of 1733 shops shipped a popup containing nothing but
+    # a name while every count above passed. 1227 at 2026-10-07; losing the Red Cross
+    # blob drops it to ~1049 and losing the OSM tags to ~945, so sit above both while
+    # leaving room for ordinary OSM tagging churn.
+    'with_address': 1100,
 }
 
 
