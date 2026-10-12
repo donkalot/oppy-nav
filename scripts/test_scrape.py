@@ -15,8 +15,58 @@ from scrape_all import (
     vinnies_hours, parse_vinnies_page, parse_osm_hours,
     redcross_hours, parse_redcross_page, salvos_street_variants,
     osm_db_age_days, OSM_MAX_DB_AGE_DAYS, osm_verdict, OSM_MIN_ELEMENTS,
+    uplister_hours, SALVOS_TEST_RECORD,
 )
 import datetime
+
+
+# ----- uplister_hours -----
+# The Salvos GraphQL type has no hours field at all, which is why only 9% of Salvos
+# shops had hours before this feed was joined in.
+
+def test_uplister_hours_parses_a_normal_week():
+    got = uplister_hours({
+        'Monday': {'Opening': '09:00:00', 'Closing': '17:00:00'},
+        'Saturday': {'Opening': '09:00:00', 'Closing': '17:30:00'},
+        'Sunday': 'Close',
+    })
+    assert got == {'mon': {'o': '09:00', 'c': '17:00'},
+                   'sat': {'o': '09:00', 'c': '17:30'}}
+
+
+def test_uplister_hours_drops_closed_days():
+    """A closed day arrives as the bare string "Close", not a dict."""
+    assert uplister_hours({'Sunday': 'Close'}) == {}
+
+
+def test_uplister_hours_drops_a_zero_length_day():
+    """Open == close is a closed day expressed badly; emitting it would render as
+    "9:00-9:00" and read as open."""
+    assert uplister_hours({'Monday': {'Opening': '09:00:00', 'Closing': '09:00:00'}}) == {}
+
+
+def test_uplister_hours_ignores_junk_times():
+    assert uplister_hours({'Monday': {'Opening': '', 'Closing': '17:00:00'}}) == {}
+    assert uplister_hours({'Monday': {'Opening': 'nine', 'Closing': '17:00:00'}}) == {}
+    assert uplister_hours({'Monday': {}}) == {}
+
+
+def test_uplister_hours_tolerates_a_missing_block():
+    """Enrichment must never raise: a shape change here should cost hours, not the
+    460-odd Salvos shops."""
+    assert uplister_hours(None) == {}
+    assert uplister_hours([]) == {}
+    assert uplister_hours({'Funday': {'Opening': '09:00:00', 'Closing': '17:00:00'}}) == {}
+
+
+def test_salvos_test_record_matches_only_the_fixtures():
+    """Checked against the live roster: these two match, and no real store name or
+    street in either feed does."""
+    assert SALVOS_TEST_RECORD.search('Test Warehouse Only')
+    assert SALVOS_TEST_RECORD.search('88 Test Street Street')
+    for real in ('Youngtown, TAS', 'Belconnen', 'Testament Road', 'Protestant Hill',
+                 '405-407 Hobart Road'):
+        assert not SALVOS_TEST_RECORD.search(real), real
 
 
 # ----- osm_db_age_days -----
@@ -620,10 +670,10 @@ def test_compact_keeps_hours():
 
 
 # ----- assert_quality -----
-# The live run on 2026-10-07. Every case below perturbs one field of this baseline,
+# The live run on 2026-10-12. Every case below perturbs one field of this baseline,
 # so retuning a threshold doesn't need nine literals edited in lockstep.
-OK = {'vinnies': 452, 'redcross': 178, 'salvos': 463, 'osm': 769}
-OK_TOTAL, OK_HOURS, OK_ADDR = 1862, 856, 1367
+OK = {'vinnies': 452, 'redcross': 178, 'salvos': 439, 'osm': 731}
+OK_TOTAL, OK_HOURS, OK_ADDR = 1800, 1214, 1338
 
 
 def test_quality_passes_at_baseline():

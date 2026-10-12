@@ -204,6 +204,85 @@ def _parallel(urls, fn, label, workers=10):
 
 # ----- Salvos -----
 
+SALVOS_UPLISTER_URL = 'https://www.salvosstores.com.au/api/uplister/store-list'
+
+UPLISTER_DAYS = {'monday': 'mon', 'tuesday': 'tue', 'wednesday': 'wed',
+                 'thursday': 'thu', 'friday': 'fri', 'saturday': 'sat',
+                 'sunday': 'sun'}
+
+
+def uplister_hours(opening_hours):
+    """Per-day {'Opening': 'HH:MM:SS', 'Closing': ...}, or the string "Close".
+
+    The Salvos GraphQL warehouse type carries no hours at all — introspection shows
+    seven fields, none of them opening times — which is why this second endpoint is
+    worth joining against.
+    """
+    hours = {}
+    if not isinstance(opening_hours, dict):
+        return hours
+    for day, spec in opening_hours.items():
+        wd = UPLISTER_DAYS.get(str(day).strip().lower())
+        if not wd or not isinstance(spec, dict):
+            continue
+        o, c = str(spec.get('Opening') or ''), str(spec.get('Closing') or '')
+        if not (re.fullmatch(r'\d{1,2}:\d{2}(:\d{2})?', o)
+                and re.fullmatch(r'\d{1,2}:\d{2}(:\d{2})?', c)):
+            continue
+        o, c = o[:5], c[:5]
+        # A zero-length day is a closed day expressed badly; publishing "9:00-9:00"
+        # would read as open.
+        if o == c:
+            continue
+        hours[wd] = {'o': o, 'c': c}
+    return hours
+
+
+def fetch_salvos_uplister():
+    """Fetch the store-list feed behind the official locator, keyed by warehouse id.
+
+    Returns {} on any failure: this is an enrichment pass, so a dead endpoint should
+    cost hours and pin precision, not the 460-odd shops themselves.
+    """
+    print('Salvos: uplister store-list...', flush=True)
+    try:
+        r = requests.get(SALVOS_UPLISTER_URL, headers=HEADERS, timeout=60)
+        if r.status_code != 200:
+            print(f'  uplister -> {r.status_code}; skipping enrichment', flush=True)
+            return {}
+        data = r.json()
+    except Exception as e:
+        print(f'  uplister err: {e}; skipping enrichment', flush=True)
+        return {}
+    stores = list(data.values()) if isinstance(data, dict) else list(data or [])
+    out = {}
+    for s in stores:
+        if not isinstance(s, dict) or not s.get('SaleorId'):
+            continue
+        out[s['SaleorId']] = {
+            'hours': uplister_hours(s.get('OpeningHours')),
+            'lat': _num(s.get('Latitude')),
+            'lon': _num(s.get('Longitude')),
+            # Salvos' own locator renders neither: its store list is filtered with
+            # `0 === HiddenStore && 0 === isPermanentlyClosed`. Mapping a shop that
+            # shut in 2024 is worse than omitting it.
+            'closed': bool(s.get('isPermanentlyClosed') or s.get('isClosed')
+                           or s.get('HiddenStore')),
+        }
+    closed = sum(1 for v in out.values() if v['closed'])
+    print(f'  {len(stores)} stores, {len(out)} with ids, {closed} flagged closed',
+          flush=True)
+    return out
+
+
+def _num(x):
+    """Coords arrive as strings and some carry a trailing comma ("-38.356169,")."""
+    try:
+        return float(str(x).strip().rstrip(',').strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def fetch_salvos_addresses():
     print('Salvos: GraphQL...', flush=True)
     url = 'https://salvos-api-new.annix.com.au/graphql/'
@@ -252,6 +331,8 @@ def fetch_salvos_addresses():
     return out
 
 
+SALVOS_TEST_RECORD = re.compile(r'(?i)\btest\b')
+
 SALVOS_UNIT_PREFIX = re.compile(
     r'(?i)^\s*(?:shop|unit|suite|tenancy|tnc|level|kiosk|t)\s*[\w&\-/. ]{0,12}?[,/]\s*')
 SALVOS_BARE_UNIT = re.compile(r'^\s*[\dA-Za-z&\- ]{1,10}/\s*')
@@ -271,14 +352,20 @@ def salvos_street_variants(street):
     return seen
 
 
-def geocode_salvos(records, cache_path):
+def geocode_salvos(records, cache_path, uplister=None):
     """Only geocode records whose id isn't already in the cache."""
     cache = {}
     if cache_path.exists():
         for r in json.loads(cache_path.read_text(encoding='utf-8')):
             cache[r['id']] = r
-    todo = [s for s in records if s['id'] not in cache or 'lat' not in cache[s['id']]]
-    print(f'Salvos geocode: cached={len([r for r in cache.values() if "lat" in r])}, to-geocode={len(todo)}', flush=True)
+    up = uplister or {}
+    # Uplister ships real store coordinates, so anything it covers needs no Nominatim
+    # call at all — and its coords are better than ours even when we already have some.
+    todo = [s for s in records
+            if (s['id'] not in cache or 'lat' not in cache[s['id']])
+            and (up.get(s['id']) or {}).get('lat') is None]
+    print(f'Salvos geocode: cached={len([r for r in cache.values() if "lat" in r])}, '
+          f'to-geocode={len(todo)}', flush=True)
 
     def geocode(q):
         u = 'https://nominatim.openstreetmap.org/search?' + urllib.parse.urlencode({
@@ -336,18 +423,44 @@ def geocode_salvos(records, cache_path):
     cache_path.write_text(json.dumps(list(cache.values()), ensure_ascii=False), encoding='utf-8')
 
     out = []
+    dropped_closed = dropped_test = exact = with_hours = 0
     for r in cache.values():
-        if 'lat' not in r: continue
+        u = up.get(r['id']) or {}
+        if u.get('closed'):
+            dropped_closed += 1
+            continue
+        # The warehouse list carries two literal fixtures ("Test Warehouse Only" at
+        # "TEST CITY", "Test Geps, SA" on "88 Test Street Street"). Uplister omits
+        # both, so they survive only because they have no uplister record to flag.
+        if SALVOS_TEST_RECORD.search(r['name']) or SALVOS_TEST_RECORD.search(r.get('street') or ''):
+            dropped_test += 1
+            continue
+        lat, lon = u.get('lat'), u.get('lon')
+        approx = r.get('precision') == 'suburb'
+        if lat is not None and lon is not None:
+            # Two geocoded pins sat 109km and 100km from the real shop, which the
+            # "approximate" badge understates badly.
+            if approx:
+                exact += 1
+            approx = False
+        elif 'lat' in r:
+            lat, lon = r['lat'], r['lon']
+        else:
+            continue
+        hours = u.get('hours') or {}
+        with_hours += 1 if hours else 0
         out.append({
             'name': r['name'], 'operator': 'Salvos', 'chain': 'salvos',
-            'lat': round(float(r['lat']), 6), 'lon': round(float(r['lon']), 6),
+            'lat': round(float(lat), 6), 'lon': round(float(lon), 6),
             'address': r['street'], 'suburb': r['city'], 'state': r['state'],
             'postcode': str(r['postcode']), 'phone': r['phone'],
-            'hours': {}, 'source': 'salvos',
-            'approx': r.get('precision') == 'suburb',
+            'hours': hours, 'source': 'salvos',
+            'approx': approx,
         })
     print(f'Salvos: {len(out)} of {len(records)} upstream records placed '
-          f'({sum(1 for r in out if r["approx"])} suburb-level)', flush=True)
+          f'({sum(1 for r in out if r["approx"])} suburb-level, {with_hours} with hours); '
+          f'dropped {dropped_closed} closed, {dropped_test} test; '
+          f'{exact} pins upgraded to exact', flush=True)
     return out
 
 
@@ -585,9 +698,8 @@ def dedupe(shops):
                 if match: break
             if match: break
         if match:
-            # Red Cross and Salvos publish no hours at all, so the OSM twin being
-            # dropped here is often the only record that knows when the shop is open.
-            # Keep the winner's identity, inherit the detail it lacks.
+            # A dropped OSM twin is sometimes the only record that knows when the shop
+            # is open. Keep the winner's identity, inherit the detail it lacks.
             if s.get('hours') and not match.get('hours'):
                 match['hours'] = s['hours']
             for field in ('phone', 'postcode', 'state'):
@@ -606,17 +718,19 @@ def dedupe(shops):
 MIN_COUNTS = {
     'vinnies': 350,
     'redcross': 130,
-    # 463 at 2026-10-07, after the three-tier geocode recovered 154 records the
-    # single-tier version silently dropped. Floor raised so a regression back to
-    # street-only geocoding (317) fails instead of passing.
+    # 439 at 2026-10-12: the three-tier geocode recovered 154 records the single-tier
+    # version silently dropped, then 29 permanently-closed and test records were
+    # suppressed. Floor catches a regression to street-only geocoding (317).
     'salvos': 400,
     'osm': 600,
     'total_kept': 1500,
     # Counts alone can't catch a break in the hours sub-schema: coords still parse,
     # every threshold passes, and the app ships with a dead "Open now" filter.
-    # 854 at 2026-10-07 (vinnies 447, redcross 169, osm 207, salvos 31). Set so that
-    # losing any single source's hours trips it: the largest survivable loss is salvos.
-    'with_hours': 700,
+    # 1214 at 2026-10-12 (vinnies 447, salvos 408, osm 190, redcross 169) — Salvos went
+    # 31 -> 408 once the uplister feed was joined in, since the GraphQL warehouse type
+    # carries no hours at all. Set so a break in either large source's hours sub-schema
+    # trips it (vinnies -> 767, salvos -> 806) while leaving 18% for OSM tagging churn.
+    'with_hours': 1000,
     # Two defects hid behind the shop counts for months: Red Cross moved its store
     # details out of JSON-LD, and scrape_osm hardcoded 'address' to empty. Both left
     # the coords intact, so 695 of 1733 shops shipped a popup containing nothing but
@@ -680,7 +794,8 @@ def main():
     vinnies = scrape_vinnies()
     redcross = scrape_redcross()
     salvos_addrs = fetch_salvos_addresses()
-    salvos = geocode_salvos(salvos_addrs, DATA / 'salvos_geocoded.json')
+    salvos = geocode_salvos(salvos_addrs, DATA / 'salvos_geocoded.json',
+                            fetch_salvos_uplister())
     osm = fetch_osm()
 
     all_shops = vinnies + redcross + salvos + osm
