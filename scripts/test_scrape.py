@@ -15,9 +15,107 @@ from scrape_all import (
     vinnies_hours, parse_vinnies_page, parse_osm_hours,
     redcross_hours, parse_redcross_page, salvos_street_variants,
     osm_db_age_days, OSM_MAX_DB_AGE_DAYS, osm_verdict, OSM_MIN_ELEMENTS,
-    uplister_hours, SALVOS_TEST_RECORD,
+    uplister_hours, SALVOS_TEST_RECORD, reverse_geocode_missing, AU_STATES,
+    reverse_state,
 )
 import datetime
+
+
+# ----- reverse_geocode_missing -----
+# 461 OSM shops carry coords but no addr:* tags at all, so no parser change reaches
+# them. These tests cover the cache-application half; the network half is the fetch.
+
+def _cache_file(tmp_path, payload):
+    p = tmp_path / 'rev.json'
+    p.write_text(json.dumps(payload), encoding='utf-8')
+    return p
+
+
+def _bare(**kw):
+    base = {'name': 'Op shop', 'lat': -37.81449, 'lon': 144.96073,
+            'address': '', 'suburb': '', 'state': '', 'postcode': ''}
+    base.update(kw)
+    return base
+
+
+def test_reverse_geocode_fills_and_flags(tmp_path):
+    """A filled address must be marked so the popup can say where it came from — the
+    street is whatever sits at that coordinate, which can be the building next door."""
+    cache = _cache_file(tmp_path, {'-37.81449,144.96073': {
+        'address': '117-119 Maitland Road', 'suburb': 'Mayfield',
+        'state': 'NSW', 'postcode': '2304'}})
+    s = _bare()
+    reverse_geocode_missing([s], cache)
+    assert s['address'] == '117-119 Maitland Road'
+    assert s['suburb'] == 'Mayfield' and s['state'] == 'NSW'
+    assert s['address_approx'] is True
+
+
+def test_reverse_geocode_never_overwrites_an_upstream_address(tmp_path):
+    """Upstream data always wins: a published address is authoritative over one derived
+    from coordinates, and must not be flagged approximate."""
+    cache = _cache_file(tmp_path, {'-37.81449,144.96073': {
+        'address': '1 Wrong Street', 'suburb': 'Elsewhere', 'state': 'NSW',
+        'postcode': '9999'}})
+    s = _bare(address='42 Real Road', suburb='Truthville')
+    reverse_geocode_missing([s], cache)
+    assert s['address'] == '42 Real Road' and s['suburb'] == 'Truthville'
+    assert 'address_approx' not in s
+
+
+def test_reverse_geocode_ignores_an_empty_cache_hit(tmp_path):
+    """Nominatim can resolve a coordinate to nothing useful. Flagging that as an
+    approximate address would put an empty "(address from map)" note in the popup."""
+    cache = _cache_file(tmp_path, {'-37.81449,144.96073': {
+        'address': '', 'suburb': '', 'state': '', 'postcode': ''}})
+    s = _bare()
+    reverse_geocode_missing([s], cache)
+    assert 'address_approx' not in s
+
+
+def test_reverse_geocode_accepts_a_suburb_only_hit(tmp_path):
+    """Street unknown but suburb known still beats a name-only popup."""
+    cache = _cache_file(tmp_path, {'-37.81449,144.96073': {
+        'address': '', 'suburb': 'Mayfield', 'state': 'NSW', 'postcode': '2304'}})
+    s = _bare()
+    reverse_geocode_missing([s], cache)
+    assert s['suburb'] == 'Mayfield' and s['address_approx'] is True
+
+
+def test_reverse_geocode_cache_key_is_coordinate_rounded(tmp_path):
+    """Keyed on 5dp so a shop whose coords wobble in the 6th place still hits cache
+    rather than spending another 1.1s lookup every week."""
+    cache = _cache_file(tmp_path, {'-37.81449,144.96073': {
+        'address': '1 Real Road', 'suburb': 'Mayfield', 'state': 'NSW', 'postcode': ''}})
+    s = _bare(lat=-37.814494, lon=144.960731)
+    reverse_geocode_missing([s], cache)
+    assert s['address'] == '1 Real Road'
+
+
+def test_au_states_covers_every_state_nominatim_returns():
+    """Nominatim returns full names; every other source emits the abbreviation and the
+    app's state filter matches on it, so an unmapped state silently empties the field."""
+    assert set(AU_STATES.values()) == {'NSW', 'VIC', 'QLD', 'SA', 'WA', 'TAS',
+                                       'ACT', 'NT'}
+    assert AU_STATES['new south wales'] == 'NSW'
+
+
+def test_reverse_state_prefers_the_iso_code():
+    assert reverse_state({'ISO3166-2-lvl4': 'AU-NSW', 'state': 'Victoria'}) == 'NSW'
+
+
+def test_reverse_state_reads_the_act_from_territory():
+    """Measured on a real Canberra lookup: the ACT comes back under `territory`, with
+    no `state` key at all, so reading `state` alone blanks every Canberra shop."""
+    a = {'territory': 'Australian Capital Territory', 'suburb': 'Dickson'}
+    assert reverse_state(a) == 'ACT'
+
+
+def test_reverse_state_handles_an_external_territory():
+    """Norfolk Island reports territory "Norfolk Island" and no ISO lvl4. It's a real
+    Australian shop, so an empty state is correct — but it must not raise."""
+    assert reverse_state({'territory': 'Norfolk Island'}) == ''
+    assert reverse_state({}) == ''
 
 
 # ----- uplister_hours -----

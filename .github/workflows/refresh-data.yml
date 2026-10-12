@@ -31,7 +31,9 @@ jobs:
         run: |
           git config user.name  "oppy-nav-bot"
           git config user.email "oppy-nav-bot@users.noreply.github.com"
-          git add index.html data/salvos_geocoded.json
+          # The geocode caches must be committed, or every weekly run re-spends ~600
+          # Nominatim lookups at 1.1s each on data that hasn't changed.
+          git add index.html data/salvos_geocoded.json data/reverse_geocoded.json
           if git diff --cached --quiet; then
             echo "No changes."
           else

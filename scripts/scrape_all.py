@@ -664,6 +664,107 @@ def parse_osm_elements(data):
     return shops
 
 
+# ----- Reverse geocoding -----
+
+# Nominatim returns full state names; every other source emits the abbreviation, and
+# the app's state filter matches on it.
+AU_STATES = {
+    'new south wales': 'NSW', 'victoria': 'VIC', 'queensland': 'QLD',
+    'south australia': 'SA', 'western australia': 'WA', 'tasmania': 'TAS',
+    'australian capital territory': 'ACT', 'northern territory': 'NT',
+}
+
+
+def reverse_state(address):
+    """Pull a state abbreviation out of a Nominatim address block.
+
+    The ISO code is the reliable field: the ACT arrives under `territory` rather than
+    `state`, so reading `state` alone silently blanks every Canberra shop.
+    """
+    iso = (address.get('ISO3166-2-lvl4') or '')
+    if iso.startswith('AU-'):
+        return iso[3:]
+    for field in ('state', 'territory'):
+        hit = AU_STATES.get((address.get(field) or '').lower())
+        if hit:
+            return hit
+    return ''
+
+def reverse_geocode_missing(shops, cache_path, limit=None):
+    """Fill in addresses for shops that have coordinates but no address.
+
+    These are OSM records with no `addr:*` tags at all — genuinely absent upstream,
+    so no parser change reaches them. Nominatim resolves them backwards from the
+    coordinates instead. Cached by rounded coordinate so the weekly run only pays for
+    newly-appeared shops.
+
+    Addresses added here are marked `address_approx` and are deliberately NOT counted
+    towards the with_address quality floor: a backfill that counted would mask exactly
+    the upstream parse breaks that floor exists to catch.
+    """
+    cache = {}
+    if cache_path.exists():
+        cache = json.loads(cache_path.read_text(encoding='utf-8'))
+
+    def key(s):
+        return f"{s['lat']:.5f},{s['lon']:.5f}"
+
+    todo = [s for s in shops
+            if not s.get('address') and not s.get('suburb')
+            and s.get('lat') is not None and key(s) not in cache]
+    print(f'Reverse geocode: cached={len(cache)}, to-look-up={len(todo)}', flush=True)
+    if limit is not None:
+        todo = todo[:limit]
+
+    t0 = time.time()
+    for i, s in enumerate(todo, 1):
+        u = 'https://nominatim.openstreetmap.org/reverse?' + urllib.parse.urlencode({
+            'lat': s['lat'], 'lon': s['lon'], 'format': 'json', 'zoom': 18,
+            'addressdetails': 1})
+        a = None
+        for _ in range(3):
+            try:
+                req = urllib.request.Request(
+                    u, headers={'User-Agent': UA, 'Accept-Language': 'en-AU'})
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    a = (json.load(r) or {}).get('address') or {}
+                break
+            except Exception:
+                time.sleep(2)
+        if a is None:
+            continue
+        road = a.get('road') or ''
+        cache[key(s)] = {
+            'address': ' '.join(v for v in (a.get('house_number'), road) if v),
+            'suburb': a.get('suburb') or a.get('city') or a.get('town')
+                      or a.get('village') or a.get('municipality') or '',
+            'state': reverse_state(a),
+            'postcode': a.get('postcode') or '',
+        }
+        if i % 25 == 0 or i == len(todo):
+            cache_path.write_text(json.dumps(cache, ensure_ascii=False), encoding='utf-8')
+            print(f'  {i}/{len(todo)} · {i/max(time.time()-t0, 0.001):.2f}/s', flush=True)
+        time.sleep(1.1)
+    cache_path.write_text(json.dumps(cache, ensure_ascii=False), encoding='utf-8')
+
+    filled = 0
+    for s in shops:
+        if s.get('address') or s.get('suburb') or s.get('lat') is None:
+            continue
+        hit = cache.get(key(s))
+        if not hit or not (hit.get('address') or hit.get('suburb')):
+            continue
+        for field in ('address', 'suburb', 'state', 'postcode'):
+            if hit.get(field) and not s.get(field):
+                s[field] = hit[field]
+        s['address_approx'] = True
+        filled += 1
+    print(f'Reverse geocode: filled {filled} of '
+          f'{sum(1 for s in shops if not s.get("address") and not s.get("suburb")) + filled}',
+          flush=True)
+    return shops
+
+
 # ----- Dedupe -----
 
 def dist_km(a, b):
@@ -775,6 +876,10 @@ def compact_records(shops):
         if s.get('phone'): rec['ph'] = s['phone']
         if s.get('hours'): rec['h'] = s['hours']
         if s.get('approx'): rec['ax'] = 1
+        # Address derived from the coords rather than published by the shop: the street
+        # is whatever Nominatim finds at that point, so it can name the building next
+        # door. Worth showing, worth labelling.
+        if s.get('address_approx'): rec['aa'] = 1
         out.append(rec)
     return out
 
@@ -811,7 +916,13 @@ def main():
     print(f'By source: {by_source} · with hours: {with_hours} '
           f'· with address: {with_address}', flush=True)
 
+    # Guard on upstream-parsed addresses only, before the backfill: counting
+    # reverse-geocoded ones would hold the number up while a source's address parsing
+    # broke, which is the failure the floor exists to catch.
     assert_quality(by_source, len(deduped), with_hours, with_address)
+
+    # After dedupe, so we never spend a lookup on a record that gets dropped.
+    deduped = reverse_geocode_missing(deduped, DATA / 'reverse_geocoded.json')
     rebuild_html(compact_records(deduped))
 
 
