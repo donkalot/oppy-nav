@@ -7,11 +7,14 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 import json
 
+import pytest
+
+import scrape_all
 from scrape_all import (
     dist_km, dedupe, compact_records, assert_quality, MIN_COUNTS,
     vinnies_hours, parse_vinnies_page, parse_osm_hours,
     redcross_hours, parse_redcross_page, salvos_street_variants,
-    osm_db_age_days, OSM_MAX_DB_AGE_DAYS,
+    osm_db_age_days, OSM_MAX_DB_AGE_DAYS, osm_verdict, OSM_MIN_ELEMENTS,
 )
 import datetime
 
@@ -50,6 +53,161 @@ def test_osm_db_age_missing_or_unparseable_is_none():
     assert osm_db_age_days({}, now=NOW) is None
     assert osm_db_age_days(_d('not-a-date'), now=NOW) is None
     assert osm_db_age_days({'osm3s': {}}, now=NOW) is None
+
+
+# ----- osm_verdict -----
+# The verdict decides two things: whether to publish, and whether a second pass at
+# the same mirror is worth the wait. 'thin' can be throttling that clears; 'stale'
+# is a property of the mirror's database and will not change in 90 seconds.
+
+def _body(n, ts, **extra):
+    return {'elements': [{'type': 'node'}] * n,
+            'osm3s': {'timestamp_osm_base': ts}, **extra}
+
+
+def test_osm_verdict_accepts_a_healthy_mirror():
+    verdict, _ = osm_verdict(_body(1151, '2026-10-12T02:40:45Z'), now=NOW)
+    assert verdict == 'ok'
+
+
+def test_osm_verdict_calls_the_stale_but_full_mirror_stale():
+    """private.coffee's 2026-10-12 answer: 1079 elements — well over the floor — from a
+    2026-05-31 database. Volume alone passes it, which is how it shipped."""
+    verdict, _ = osm_verdict(_body(1079, '2026-05-31T22:37:44Z'), now=NOW)
+    assert verdict == 'stale'
+
+
+def test_osm_verdict_calls_an_empty_result_thin_not_ok():
+    """kumi.systems' 2026-10-07 answer: HTTP 200, zero elements, remark set."""
+    verdict, _ = osm_verdict(
+        _body(0, '2026-05-06T00:00:00Z', remark='runtime error: Query timed out'),
+        now=NOW)
+    assert verdict == 'thin'
+
+
+def test_osm_verdict_thin_wins_over_stale():
+    """Classification order matters for the retry: a mirror that is both empty and stale
+    must read 'thin' so the second pass still revisits it — the emptiness may be
+    throttling, and a later round could get real data from somewhere."""
+    verdict, _ = osm_verdict(_body(OSM_MIN_ELEMENTS - 1, '2026-01-01T00:00:00Z'),
+                             now=NOW)
+    assert verdict == 'thin'
+
+
+def test_osm_verdict_unknown_age_is_not_treated_as_stale():
+    """A mirror that omits osm3s shouldn't be rejected on age it never claimed; the
+    element floor is the only check that can apply."""
+    verdict, _ = osm_verdict({'elements': [{'type': 'node'}] * 1151}, now=NOW)
+    assert verdict == 'ok'
+
+
+def test_osm_verdict_reason_names_the_numbers():
+    """The reason string is the only diagnostic in the cron log, so it has to carry the
+    element count and the database timestamp — the 2026-09 Vinnies break went four
+    weeks unnoticed partly because the log said nothing useful."""
+    _, why = osm_verdict(_body(1079, '2026-05-31T22:37:44Z'), now=NOW)
+    assert '1079' in why and '2026-05-31' in why
+
+
+# ----- fetch_osm retry -----
+# Rejecting stale mirrors means a transient 504 on the healthy one now fails the whole
+# weekly run. These cover which failures earn a second pass and which don't.
+
+FRESH = '2026-10-12T02:40:45Z'
+
+
+class _Resp:
+    def __init__(self, status, body=None):
+        self.status_code = status
+        self._body = body
+
+    def json(self):
+        if self._body is None:
+            raise ValueError('not json')
+        return self._body
+
+
+def _fake_requests(monkeypatch, responses):
+    """Serve a scripted response per (endpoint, visit-number) and record call order."""
+    calls = []
+
+    def post(url, **kw):
+        seen = sum(1 for c in calls if c == url)
+        calls.append(url)
+        r = responses[url][min(seen, len(responses[url]) - 1)]
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    monkeypatch.setattr(scrape_all.requests, 'post', post)
+    monkeypatch.setattr(scrape_all.time, 'sleep', lambda s: None)
+    monkeypatch.setattr(scrape_all, 'parse_osm_elements', lambda d: d['elements'])
+    return calls
+
+
+def test_fetch_osm_retries_a_transient_504_and_succeeds():
+    """The real 2026-10-12 failure: overpass-api.de 504s, the fallbacks are stale. One
+    round would raise; a second pass finds the primary recovered."""
+    de, kumi, coffee = scrape_all.OSM_ENDPOINTS
+    with pytest.MonkeyPatch.context() as mp:
+        calls = _fake_requests(mp, {
+            de: [_Resp(504), _Resp(200, _body(1151, FRESH))],
+            kumi: [_Resp(200, _body(1079, '2026-05-31T22:37:44Z'))],
+            coffee: [_Resp(200, _body(1079, '2026-05-31T22:37:44Z'))],
+        })
+        assert len(scrape_all.fetch_osm(rounds=2, backoff=0)) == 1151
+    assert calls == [de, kumi, coffee, de]
+
+
+def test_fetch_osm_does_not_revisit_a_stale_mirror():
+    """A stale database won't replicate five months in 90 seconds, so re-querying it
+    only burns the backoff. Only the transient failure is worth a second look."""
+    de, kumi, coffee = scrape_all.OSM_ENDPOINTS
+    stale = _Resp(200, _body(1079, '2026-05-31T22:37:44Z'))
+    with pytest.MonkeyPatch.context() as mp:
+        calls = _fake_requests(mp, {
+            de: [stale, stale],
+            kumi: [_Resp(500), _Resp(200, _body(1151, FRESH))],
+            coffee: [stale, stale],
+        })
+        assert len(scrape_all.fetch_osm(rounds=2, backoff=0)) == 1151
+    assert calls.count(de) == 1 and calls.count(coffee) == 1
+
+
+def test_fetch_osm_raises_rather_than_publishing_a_stale_result():
+    """Failing the run is the correct outcome: a partial OSM result deletes shops from
+    the published map, and the quality guard downstream can't tell the difference
+    between 'mirror was stale' and 'these shops closed'."""
+    stale = _Resp(200, _body(1079, '2026-05-31T22:37:44Z'))
+    with pytest.MonkeyPatch.context() as mp:
+        _fake_requests(mp, {ep: [stale, stale] for ep in scrape_all.OSM_ENDPOINTS})
+        with pytest.raises(RuntimeError, match='stale'):
+            scrape_all.fetch_osm(rounds=2, backoff=0)
+
+
+def test_fetch_osm_stops_early_when_nothing_is_retryable():
+    """All-stale means no candidates remain, so the second round must not sleep through
+    a backoff it cannot use — the cron has a finite budget."""
+    stale = _Resp(200, _body(1079, '2026-05-31T22:37:44Z'))
+    slept = []
+    with pytest.MonkeyPatch.context() as mp:
+        _fake_requests(mp, {ep: [stale] for ep in scrape_all.OSM_ENDPOINTS})
+        mp.setattr(scrape_all.time, 'sleep', lambda s: slept.append(s))
+        with pytest.raises(RuntimeError):
+            scrape_all.fetch_osm(rounds=3, backoff=90)
+    assert slept == []
+
+
+def test_fetch_osm_survives_a_network_error():
+    """An exception mid-loop must not abandon the remaining mirrors."""
+    de, kumi, _ = scrape_all.OSM_ENDPOINTS
+    with pytest.MonkeyPatch.context() as mp:
+        _fake_requests(mp, {
+            de: [OSError('connection reset')],
+            kumi: [_Resp(200, _body(1151, FRESH))],
+            scrape_all.OSM_ENDPOINTS[2]: [_Resp(500)],
+        })
+        assert len(scrape_all.fetch_osm(rounds=1, backoff=0)) == 1151
 
 
 # ----- parse_osm_hours -----

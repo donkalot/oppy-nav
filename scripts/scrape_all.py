@@ -445,54 +445,83 @@ def osm_db_age_days(data, now=None):
     return (now - base).total_seconds() / 86400
 
 
-def fetch_osm():
-    print('OSM: overpass...', flush=True)
-    q = '[out:json][timeout:120];area["ISO3166-1"="AU"][admin_level=2]->.au;nwr["shop"="charity"](area.au);out center tags;'
+OSM_ENDPOINTS = [
     # overpass-api.de first: kumi.systems was serving a five-month-stale database on
     # 2026-10-07 (base 2026-05-06) and answering AU-wide queries with zero elements.
-    endpoints = [
-        'https://overpass-api.de/api/interpreter',
-        'https://overpass.kumi.systems/api/interpreter',
-        'https://overpass.private.coffee/api/interpreter',
-    ]
-    data = None
-    for ep in endpoints:
-        try:
-            r = requests.post(ep, data={'data': q}, headers=HEADERS, timeout=180)
-            if r.status_code != 200:
-                print(f'  {ep} -> {r.status_code}', flush=True)
-                continue
-            d = r.json()
-            n = len(d.get('elements', []))
-            base = (d.get('osm3s') or {}).get('timestamp_osm_base')
-            age = osm_db_age_days(d)
-            # A mirror can answer 200 with an empty result set: either it is rate-limiting
-            # us (the reason arrives in "remark", not the status code) or its database is
-            # months stale. Taking that as success silently drops every OSM shop while
-            # the other mirrors sit untried.
-            if n < OSM_MIN_ELEMENTS:
-                print(f'  {ep} -> 200 but only {n} elements '
-                      f'(base {base}, remark {d.get("remark")!r}) — trying next mirror',
-                      flush=True)
-                continue
-            # A stale mirror returns a plausible count, so the count can't catch it.
-            # Publishing it quietly reverts months of OSM edits.
-            if age is not None and age > OSM_MAX_DB_AGE_DAYS:
-                print(f'  {ep} -> 200 with {n} elements but database is '
-                      f'{age:.0f} days stale (base {base}) — trying next mirror',
-                      flush=True)
-                continue
-            data = d
-            print(f'  fetched from {ep} ({n} elements, base {base}, '
-                  f'{"age unknown" if age is None else f"{age:.1f}d old"})', flush=True)
+    'https://overpass-api.de/api/interpreter',
+    'https://overpass.kumi.systems/api/interpreter',
+    'https://overpass.private.coffee/api/interpreter',
+]
+
+
+def osm_verdict(data, now=None):
+    """Classify an Overpass 200 body as 'ok', 'stale', or 'thin'.
+
+    Returned alongside a human-readable reason. Separated from the fetch so the
+    accept/reject rules are testable without network access.
+    """
+    n = len(data.get('elements', []))
+    base = (data.get('osm3s') or {}).get('timestamp_osm_base')
+    age = osm_db_age_days(data, now=now)
+    aged = 'age unknown' if age is None else f'{age:.1f}d old'
+    # A mirror can answer 200 with an empty result set: either it is rate-limiting us
+    # (the reason arrives in "remark", not the status code) or its database is months
+    # stale. Taking that as success silently drops every OSM shop.
+    if n < OSM_MIN_ELEMENTS:
+        return 'thin', f'only {n} elements (base {base}, remark {data.get("remark")!r})'
+    # A stale mirror returns a plausible count, so the count alone can't catch it.
+    # Publishing it quietly reverts months of OSM edits.
+    if age is not None and age > OSM_MAX_DB_AGE_DAYS:
+        return 'stale', f'{n} elements but database is {age:.0f} days stale (base {base})'
+    return 'ok', f'{n} elements, base {base}, {aged}'
+
+
+def fetch_osm(rounds=2, backoff=90):
+    """Fetch AU charity shops, trying each mirror until one answers fresh and full.
+
+    overpass-api.de 504s intermittently under load, which would otherwise fail the
+    whole weekly run now that a stale fallback is no longer accepted. A mirror that
+    is *stale* will not become fresh in a minute, so only transient failures —
+    non-200, network errors — are worth a second pass.
+    """
+    print('OSM: overpass...', flush=True)
+    q = '[out:json][timeout:120];area["ISO3166-1"="AU"][admin_level=2]->.au;nwr["shop"="charity"](area.au);out center tags;'
+    candidates = list(OSM_ENDPOINTS)
+    for attempt in range(1, rounds + 1):
+        retryable = []
+        for ep in candidates:
+            try:
+                r = requests.post(ep, data={'data': q}, headers=HEADERS, timeout=180)
+                if r.status_code != 200:
+                    print(f'  {ep} -> {r.status_code}', flush=True)
+                    retryable.append(ep)
+                    continue
+                data = r.json()
+                verdict, why = osm_verdict(data)
+                if verdict == 'ok':
+                    print(f'  fetched from {ep} ({why})', flush=True)
+                    return parse_osm_elements(data)
+                print(f'  {ep} -> 200 but {why} — trying next mirror', flush=True)
+                # 'thin' can be transient throttling; 'stale' is a property of the
+                # mirror and won't change between rounds.
+                if verdict == 'thin':
+                    retryable.append(ep)
+            except Exception as e:
+                print(f'  {ep} err: {e}', flush=True)
+                retryable.append(ep)
+        candidates = retryable
+        if not candidates or attempt == rounds:
             break
-        except Exception as e:
-            print(f'  {ep} err: {e}', flush=True)
-    if not data:
-        raise RuntimeError(
-            'No Overpass mirror returned a fresh, populated result — all were '
-            'unreachable, too small, or too stale. Retry later rather than '
-            'publishing: a partial OSM result silently deletes shops.')
+        print(f'  all mirrors unusable; retrying {len(candidates)} in {backoff}s '
+              f'(round {attempt + 1} of {rounds})', flush=True)
+        time.sleep(backoff)
+    raise RuntimeError(
+        'No Overpass mirror returned a fresh, populated result — all were '
+        'unreachable, too small, or too stale. Retry later rather than '
+        'publishing: a partial OSM result silently deletes shops.')
+
+
+def parse_osm_elements(data):
     shops = []
     for el in data.get('elements', []):
         if el['type'] == 'node':
