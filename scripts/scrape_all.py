@@ -4,7 +4,7 @@ Designed to run in GitHub Actions weekly. Everything is idempotent — only comm
 the resulting HTML actually changes. Salvos geocoding is cached in data/salvos_geocoded.json
 to avoid hammering Nominatim on every run.
 """
-import json, math, pathlib, re, sys, time, urllib.parse, urllib.request
+import datetime, json, math, pathlib, re, sys, time, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 
@@ -422,6 +422,27 @@ def parse_osm_hours(spec):
 # 1078 charity shops at 2026-10-07. Any mirror answering with less than a third of
 # that is broken or throttling, not reporting a real collapse in the OSM data.
 OSM_MIN_ELEMENTS = 350
+# Mirrors fall months behind without ever erroring: kumi.systems served a 2026-05-06
+# database on 2026-10-07, private.coffee a 2026-05-31 one on 2026-10-12. Both answered
+# 200 with a plausible element count, so only the replication timestamp reveals it.
+OSM_MAX_DB_AGE_DAYS = 14
+
+
+def osm_db_age_days(data, now=None):
+    """Days between the mirror's OSM replication timestamp and now, or None if it
+    didn't report one."""
+    ts = (data.get('osm3s') or {}).get('timestamp_osm_base')
+    if not ts:
+        return None
+    try:
+        base = datetime.datetime.strptime(ts, '%Y-%m-%dT%H:%M:%SZ').replace(
+            tzinfo=datetime.timezone.utc)
+    except ValueError:
+        return None
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=datetime.timezone.utc)
+    return (now - base).total_seconds() / 86400
 
 
 def fetch_osm():
@@ -443,23 +464,35 @@ def fetch_osm():
                 continue
             d = r.json()
             n = len(d.get('elements', []))
+            base = (d.get('osm3s') or {}).get('timestamp_osm_base')
+            age = osm_db_age_days(d)
             # A mirror can answer 200 with an empty result set: either it is rate-limiting
             # us (the reason arrives in "remark", not the status code) or its database is
             # months stale. Taking that as success silently drops every OSM shop while
             # the other mirrors sit untried.
             if n < OSM_MIN_ELEMENTS:
                 print(f'  {ep} -> 200 but only {n} elements '
-                      f'(base {d.get("osm3s", {}).get("timestamp_osm_base")}, '
-                      f'remark {d.get("remark")!r}) — trying next mirror', flush=True)
+                      f'(base {base}, remark {d.get("remark")!r}) — trying next mirror',
+                      flush=True)
+                continue
+            # A stale mirror returns a plausible count, so the count can't catch it.
+            # Publishing it quietly reverts months of OSM edits.
+            if age is not None and age > OSM_MAX_DB_AGE_DAYS:
+                print(f'  {ep} -> 200 with {n} elements but database is '
+                      f'{age:.0f} days stale (base {base}) — trying next mirror',
+                      flush=True)
                 continue
             data = d
-            print(f'  fetched from {ep} ({n} elements, '
-                  f'base {d.get("osm3s", {}).get("timestamp_osm_base")})', flush=True)
+            print(f'  fetched from {ep} ({n} elements, base {base}, '
+                  f'{"age unknown" if age is None else f"{age:.1f}d old"})', flush=True)
             break
         except Exception as e:
             print(f'  {ep} err: {e}', flush=True)
     if not data:
-        raise RuntimeError('All Overpass endpoints failed or returned too few elements')
+        raise RuntimeError(
+            'No Overpass mirror returned a fresh, populated result — all were '
+            'unreachable, too small, or too stale. Retry later rather than '
+            'publishing: a partial OSM result silently deletes shops.')
     shops = []
     for el in data.get('elements', []):
         if el['type'] == 'node':

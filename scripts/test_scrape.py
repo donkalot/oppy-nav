@@ -11,7 +11,45 @@ from scrape_all import (
     dist_km, dedupe, compact_records, assert_quality, MIN_COUNTS,
     vinnies_hours, parse_vinnies_page, parse_osm_hours,
     redcross_hours, parse_redcross_page, salvos_street_variants,
+    osm_db_age_days, OSM_MAX_DB_AGE_DAYS,
 )
+import datetime
+
+
+# ----- osm_db_age_days -----
+# Mirrors fall months behind while still answering 200 with a plausible element
+# count. On 2026-10-12 private.coffee served a 2026-05-31 database and shipped 719
+# OSM shops instead of 763 before this check existed.
+
+NOW = datetime.datetime(2026, 10, 12, 12, 0, 0)
+
+
+def _d(ts):
+    return {'osm3s': {'timestamp_osm_base': ts}}
+
+
+def test_osm_db_age_fresh():
+    age = osm_db_age_days(_d('2026-10-12T02:40:45Z'), now=NOW)
+    assert 0 <= age < 1
+
+
+def test_osm_db_age_detects_the_stale_mirror():
+    age = osm_db_age_days(_d('2026-05-31T22:37:44Z'), now=NOW)
+    assert age > OSM_MAX_DB_AGE_DAYS
+
+
+def test_osm_db_age_threshold_accepts_a_normal_lag():
+    """Healthy mirrors run hours behind, not days. A week of lag must still pass so a
+    transient replication hiccup doesn't fail the weekly run."""
+    assert osm_db_age_days(_d('2026-10-05T12:00:00Z'), now=NOW) < OSM_MAX_DB_AGE_DAYS
+
+
+def test_osm_db_age_missing_or_unparseable_is_none():
+    """Unknown age must not be treated as zero — that would wave a stale mirror
+    through on a malformed timestamp."""
+    assert osm_db_age_days({}, now=NOW) is None
+    assert osm_db_age_days(_d('not-a-date'), now=NOW) is None
+    assert osm_db_age_days({'osm3s': {}}, now=NOW) is None
 
 
 # ----- parse_osm_hours -----
@@ -426,8 +464,8 @@ def test_compact_keeps_hours():
 # ----- assert_quality -----
 # The live run on 2026-10-07. Every case below perturbs one field of this baseline,
 # so retuning a threshold doesn't need nine literals edited in lockstep.
-OK = {'vinnies': 452, 'redcross': 178, 'salvos': 463, 'osm': 763}
-OK_TOTAL, OK_HOURS, OK_ADDR = 1856, 854, 1365
+OK = {'vinnies': 452, 'redcross': 178, 'salvos': 463, 'osm': 769}
+OK_TOTAL, OK_HOURS, OK_ADDR = 1862, 856, 1367
 
 
 def test_quality_passes_at_baseline():
