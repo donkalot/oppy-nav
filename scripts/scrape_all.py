@@ -21,6 +21,13 @@ CHAIN_PATTERNS = [
     ('red cross','redcross'),('redcross','redcross'),('lifeline','lifeline'),
     ('anglicare','anglicare'),('sacred heart','sacredheart'),('brotherhood','bosl'),
     ('rspca','rspca'),('mission','mission'),('endeavour','endeavour'),('rotary','rotary'),
+    # First match wins, so these sit after the originals: "Lifeline Shop" operated by
+    # Uniting stays Lifeline. "save the chi" also catches the "Save the Chikldren" tag.
+    ('save the chi','savethechildren'),('good sam','goodsammy'),('anglican','anglican'),
+    ('uniting','uniting'),('animal welfare','animalwelfare'),('epilepsy','epilepsy'),
+    ('noffs','noffs'),('vmch','vmch'),
+    # Not bare "lions": "The Lions Den Op Shop" isn't a Lions Club.
+    ('lions club','lions'),('lions op','lions'),('lions community','lions'),
 ]
 
 
@@ -812,6 +819,100 @@ def dedupe(shops):
     return kept
 
 
+STREET_TYPES = {
+    'st': 'street', 'rd': 'road', 'hwy': 'highway', 'ave': 'avenue', 'av': 'avenue',
+    'tce': 'terrace', 'pde': 'parade', 'dr': 'drive', 'cres': 'crescent',
+    'pl': 'place', 'cl': 'close', 'ct': 'court', 'blvd': 'boulevard', 'ln': 'lane',
+    'esp': 'esplanade', 'cct': 'circuit', 'sq': 'square', 'arc': 'arcade',
+    'mall': 'mall', 'hway': 'highway', 'wy': 'way',
+}
+STREET_TYPE_WORDS = set(STREET_TYPES.values()) | {'streets', 'way', 'grove', 'walk'}
+
+
+def street_keys(address):
+    """Normalised (name, type) pairs for each street named in an address.
+
+    "Shop 19, The Village, 164-190 Main Street" yields the village and Main Street;
+    "Old Princes Hwy" and "Old Princes Highway" agree. Spaces are dropped so "Red Gate
+    Road" meets "Redgate Road". A directional suffix stays in the name, because Main
+    Road East and Main Road West in St Albans are different roads.
+    """
+    keys = []
+    for seg in (address or '').split(','):
+        seg = re.sub(r'^.*\d\S*\s+', '', seg.strip())
+        words = re.sub(r"[.'’]", '', seg.lower()).split()
+        words = [STREET_TYPES.get(w, w) for w in words]
+        if not words:
+            continue
+        typ = next((w for w in reversed(words) if w in STREET_TYPE_WORDS), None)
+        base = ''.join(w for w in words if w != typ)
+        if base:
+            keys.append((base, typ))
+    return keys
+
+
+def house_number(address):
+    """(low, high) of the street number, unit stripped: "4/218" -> (218, 218)."""
+    m = None
+    for m in re.finditer(r'(?:\S+/)?(\d+)[a-zA-Z]?(?:\s*-\s*(\d+))?[a-zA-Z]?\s+[A-Za-z]', address or ''):
+        pass
+    if not m:
+        return None
+    lo = int(m.group(1))
+    return (lo, int(m.group(2)) if m.group(2) else lo)
+
+
+def same_street(a, b):
+    for ab, at in street_keys(a):
+        for bb, bt in street_keys(b):
+            # "Broadway Street" vs "Broadway": a missing type is a gap, not a mismatch.
+            if ab == bb and (at == bt or at is None or bt is None):
+                return True
+    return False
+
+
+def merge_street_twins(shops, max_km=1.0):
+    """Drop OSM records that restate an official shop on the same street.
+
+    The radius pass misses shopping-centre shops: OSM tags them at the mall centroid,
+    the operator at the tenancy, and the gap reaches 900m (Richmond NSW: "27 Windsor
+    Street" in both, 932m apart). Widening the radius would merge genuine neighbours,
+    so this pass instead requires the same chain AND the same street, and refuses when
+    both sides publish house numbers that disagree (312 vs 481A Keilor Road is two
+    shops). Reverse-geocoded numbers are only "what's at that point", so they never
+    veto. Runs after the backfill because most of these OSM records have no address
+    until then. Official-vs-official is never merged: those are distinct listings.
+    """
+    official = [s for s in shops if s['source'] != 'osm' and s.get('address')]
+    drop = set()
+    for s in shops:
+        if s['source'] != 'osm' or s['chain'] == 'independent' or not s.get('address'):
+            continue
+        best = None
+        for k in official:
+            if k['chain'] != s['chain'] or abs(k['lat'] - s['lat']) > 0.02:
+                continue
+            d = dist_km(k, s)
+            if d >= max_km or not same_street(k['address'], s['address']):
+                continue
+            kn, sn = house_number(k['address']), (None if s.get('address_approx')
+                                                  else house_number(s['address']))
+            if kn and sn and (sn[1] < kn[0] or sn[0] > kn[1]):
+                continue
+            if best is None or d < best[0]:
+                best = (d, k)
+        if best:
+            k = best[1]
+            if s.get('hours') and not k.get('hours'):
+                k['hours'] = s['hours']
+            for field in ('phone', 'postcode', 'state'):
+                if s.get(field) and not k.get(field):
+                    k[field] = s[field]
+            drop.add(id(s))
+    print(f'Street twins: dropped {len(drop)} OSM records', flush=True)
+    return [s for s in shops if id(s) not in drop]
+
+
 # ----- Quality guards -----
 # Baselines from the first successful run (2026-07-30): vinnies 453, redcross 177,
 # salvos 310, osm 757, total kept 1697. Thresholds are ~25% below actuals so upstream
@@ -923,6 +1024,7 @@ def main():
 
     # After dedupe, so we never spend a lookup on a record that gets dropped.
     deduped = reverse_geocode_missing(deduped, DATA / 'reverse_geocoded.json')
+    deduped = merge_street_twins(deduped)
     rebuild_html(compact_records(deduped))
 
 

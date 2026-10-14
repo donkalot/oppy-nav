@@ -16,9 +16,11 @@ from scrape_all import (
     redcross_hours, parse_redcross_page, salvos_street_variants,
     osm_db_age_days, OSM_MAX_DB_AGE_DAYS, osm_verdict, OSM_MIN_ELEMENTS,
     uplister_hours, SALVOS_TEST_RECORD, reverse_geocode_missing, AU_STATES,
-    reverse_state,
+    reverse_state, merge_street_twins, same_street, house_number,
+    parse_osm_elements, CHAIN_PATTERNS,
 )
 import datetime
+import re
 
 
 # ----- reverse_geocode_missing -----
@@ -729,6 +731,147 @@ def test_dedupe_salvos_wider_radius():
     kept = dedupe(shops)
     assert len(kept) == 1
     assert kept[0]['source'] == 'salvos'
+
+
+# ----- merge_street_twins -----
+# 18 twins at 166–932m survived the radius pass in the 2026-10-15 data: shopping-centre
+# shops that OSM tags at the mall centroid while the operator gives the tenancy.
+
+def _tw(source, chain, address, dlat=0.0, approx=False, **kw):
+    s = {'lat': -37.81 + dlat, 'lon': 144.96, 'source': source, 'chain': chain,
+         'name': kw.pop('name', source), 'operator': '', 'address': address, **kw}
+    if approx:
+        s['address_approx'] = True
+    return s
+
+
+def test_street_twin_mall_centroid_merges():
+    """Wantirna South, measured: OSM 499m from the tenancy, same Burwood Highway number."""
+    shops = [_tw('salvos', 'salvos', 'Knox Westfield Ozone, Shop 8133/ 425 Burwood Highway'),
+             _tw('osm', 'salvos', '425 Burwood Highway', dlat=0.0045, approx=True)]
+    kept = merge_street_twins(shops)
+    assert [s['source'] for s in kept] == ['salvos']
+
+
+def test_street_twin_conflicting_numbers_kept():
+    """Essendon North: 312 and 481A Keilor Road are two shops, not one shop twice."""
+    shops = [_tw('vinnies', 'vinnies', '312 Keilor Road'),
+             _tw('osm', 'vinnies', '481A Keilor Road', dlat=0.004)]
+    assert len(merge_street_twins(shops)) == 2
+
+
+def test_street_twin_reverse_geocoded_number_never_vetoes():
+    """A backfilled number is whatever building sits at the OSM point — 27 Griffith Street
+    for a shop at 80 — so it can't be evidence of a second shop."""
+    shops = [_tw('redcross', 'redcross', '80 Griffith Street'),
+             _tw('osm', 'redcross', '27 Griffith Street', dlat=0.0015, approx=True)]
+    assert len(merge_street_twins(shops)) == 1
+
+
+def test_street_twin_number_inside_a_range_matches():
+    shops = [_tw('salvos', 'salvos', '499 High Street'),
+             _tw('osm', 'salvos', '499-505 High Street', dlat=0.0035)]
+    assert len(merge_street_twins(shops)) == 1
+
+
+def test_street_twin_directional_suffix_is_a_different_road():
+    """St Albans: Main Road East and Main Road West are separate roads 521m apart."""
+    shops = [_tw('vinnies', 'vinnies', '276-278 Main Road East'),
+             _tw('osm', 'vinnies', 'Main Road West', dlat=0.0045, approx=True)]
+    assert len(merge_street_twins(shops)) == 2
+
+
+def test_street_twin_needs_same_chain():
+    shops = [_tw('vinnies', 'vinnies', '10 Marshall Street'),
+             _tw('osm', 'salvos', '10 Marshall Street', dlat=0.003)]
+    assert len(merge_street_twins(shops)) == 2
+
+
+def test_street_twin_never_merges_two_official_records():
+    """Two Red Cross shops in Fremantle are both real listings; only OSM is redundant."""
+    shops = [_tw('redcross', 'redcross', '37 Market Street'),
+             _tw('redcross', 'redcross', '37 Market Street', dlat=0.003)]
+    assert len(merge_street_twins(shops)) == 2
+
+
+def test_street_twin_respects_max_distance():
+    shops = [_tw('salvos', 'salvos', '27 Windsor Street'),
+             _tw('osm', 'salvos', '27 Windsor Street', dlat=0.02)]  # ~2.2km
+    assert len(merge_street_twins(shops)) == 2
+
+
+def test_street_twin_inherits_hours_from_the_dropped_record():
+    shops = [_tw('vinnies', 'vinnies', '260 Sydney Road', hours={}),
+             _tw('osm', 'vinnies', '260 Sydney Road', dlat=0.0038,
+                 hours={'mon': {'o': '09:00', 'c': '17:00'}})]
+    kept = merge_street_twins(shops)
+    assert kept[0]['hours'] == {'mon': {'o': '09:00', 'c': '17:00'}}
+
+
+@pytest.mark.parametrize('a,b', [
+    ('710 Old Princes Hwy', '710 Old Princes Highway'),
+    ('54 Red Gate Road', 'Redgate Road'),
+    ('Broadway Street', 'Broadway'),
+    ('Shop 1-2, 89 John St', 'John Street'),
+    ('Ritz Arcade, Dean Street', 'Ritz Arcade'),
+    ("122 Walker  Street", 'Walker Street'),
+])
+def test_same_street_agrees(a, b):
+    assert same_street(a, b)
+
+
+@pytest.mark.parametrize('a,b', [
+    ('276-278 Main Road East', 'Main Road West'),
+    ('42 Victoria Street', '81 Victoria Crescent'),
+    ('Unit 1 12 Belford Pl', '96 Mitchell Rd'),
+])
+def test_same_street_disagrees(a, b):
+    assert not same_street(a, b)
+
+
+@pytest.mark.parametrize('addr,want', [
+    ('4/218 High Street', (218, 218)),
+    ('499-505 High Street', (499, 505)),
+    ('481A Keilor Road', (481, 481)),
+    ('Knox Westfield Ozone, Shop 8133/ 425 Burwood Highway', (425, 425)),
+    ('Broadway Street', None),
+])
+def test_house_number(addr, want):
+    assert house_number(addr) == want
+
+
+# ----- chain patterns -----
+
+def _chain_of(name, operator=''):
+    data = {'elements': [{'type': 'node', 'lat': -37.8, 'lon': 144.9,
+                          'tags': {'name': name, 'operator': operator}}]}
+    return parse_osm_elements(data)[0]['chain']
+
+
+@pytest.mark.parametrize('name,operator,want', [
+    ('Save the Children Op Shop', '', 'savethechildren'),
+    ('Save the Chikldren Op-Shop', '', 'savethechildren'),
+    ("Good Sammy's", 'Rivers', 'goodsammy'),
+    ('Annie\'s Place', "St. Luke's Anglican Parish", 'anglican'),
+    ('Carrum Op Shop', 'Carrum Uniting Church', 'uniting'),
+    ('Lions Club of Northcote Op Shop', '', 'lions'),
+    ('Penguin Lions Op-Shop', '', 'lions'),
+    # Originals win over the new patterns: first match in list order.
+    ('Lifeline Shop', 'Uniting', 'lifeline'),
+    # A shop name, not a service club.
+    ('The Lions Den Op Shop', '', 'independent'),
+])
+def test_chain_patterns(name, operator, want):
+    assert _chain_of(name, operator) == want
+
+
+def test_every_chain_id_has_a_client_label():
+    """An unlabelled chain id renders as the raw id ("goodsammy") in the filter list."""
+    html = (pathlib.Path(__file__).parent.parent / 'index.html').read_text(encoding='utf-8')
+    block = re.search(r'const CHAIN_LABELS = \{(.*?)\};', html, re.S).group(1)
+    labelled = set(re.findall(r'(\w+)\s*:', block))
+    missing = {cid for _, cid in CHAIN_PATTERNS} - labelled
+    assert not missing
 
 
 # ----- compact_records -----
