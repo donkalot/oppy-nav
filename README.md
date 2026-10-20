@@ -74,7 +74,7 @@ python scripts/scrape_all.py
 
 Salvos geocoding respects Nominatim's 1 req/sec limit — a cold run takes ~10 min for the ~470 addresses. Subsequent runs only geocode new stores (cache is warm).
 
-Salvos hours and closures come from their store-locator feed, which blocks GitHub's servers. The weekly run uses the copy in `data/salvos_uplister.json` instead, for up to 60 days. Refresh it every month or so from a home connection, then commit and push:
+Salvos hours and closures come from their store-locator feed, which blocks GitHub's servers. The weekly run uses the copy in `data/salvos_uplister.json` instead, for up to 60 days. A Windows scheduled task, "oppy-nav Salvos snapshot", refreshes and pushes it every Friday by running `scripts/refresh_uplister.ps1`. Its log is at `%TEMP%\oppy-nav-uplister.log`. To refresh by hand:
 
 ```bash
 python scripts/scrape_all.py --refresh-uplister
