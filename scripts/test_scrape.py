@@ -120,6 +120,63 @@ def test_reverse_state_handles_an_external_territory():
     assert reverse_state({}) == ''
 
 
+# ----- uplister snapshot fallback -----
+# The feed 403s GitHub runners, so a blocked fetch must fall back to the committed copy,
+# and a copy past its age cap must not be trusted.
+
+_NOW = datetime.datetime(2026, 10, 20, tzinfo=datetime.timezone.utc)
+_STORES = {'abc': {'hours': {'mon': {'o': '09:00', 'c': '17:00'}},
+                   'lat': -37.8, 'lon': 144.9, 'closed': False}}
+
+
+class _Resp:
+    def __init__(self, status, payload=None):
+        self.status_code, self._payload = status, payload
+
+    def json(self):
+        return self._payload
+
+
+def test_uplister_success_refreshes_the_snapshot(tmp_path, monkeypatch):
+    snap = tmp_path / 'up.json'
+    monkeypatch.setattr(scrape_all.requests, 'get', lambda *a, **k: _Resp(200, [
+        {'SaleorId': 'abc', 'OpeningHours': {'Monday': {'Opening': '09:00:00',
+                                                         'Closing': '17:00:00'}},
+         'Latitude': '-37.8,', 'Longitude': '144.9'}]))
+    got = scrape_all.fetch_salvos_uplister(snap, _NOW)
+    assert got == _STORES
+    assert json.loads(snap.read_text())['stores'] == _STORES
+
+
+def test_blocked_uplister_falls_back_to_a_fresh_snapshot(tmp_path, monkeypatch):
+    snap = tmp_path / 'up.json'
+    scrape_all.save_uplister_snapshot(_STORES, snap, _NOW - datetime.timedelta(days=10))
+    monkeypatch.setattr(scrape_all.requests, 'get', lambda *a, **k: _Resp(502))
+    assert scrape_all.fetch_salvos_uplister(snap, _NOW) == _STORES
+    # A failed fetch must not overwrite the good copy or reset its age.
+    assert json.loads(snap.read_text())['fetched_at'].startswith('2026-10-10')
+
+
+def test_snapshot_past_the_age_cap_is_ignored(tmp_path, monkeypatch):
+    snap = tmp_path / 'up.json'
+    old = _NOW - datetime.timedelta(days=scrape_all.UPLISTER_MAX_SNAPSHOT_DAYS + 1)
+    scrape_all.save_uplister_snapshot(_STORES, snap, old)
+    monkeypatch.setattr(scrape_all.requests, 'get', lambda *a, **k: _Resp(502))
+    assert scrape_all.fetch_salvos_uplister(snap, _NOW) == {}
+
+
+def test_empty_uplister_response_does_not_clobber_the_snapshot(tmp_path, monkeypatch):
+    snap = tmp_path / 'up.json'
+    scrape_all.save_uplister_snapshot(_STORES, snap, _NOW)
+    monkeypatch.setattr(scrape_all.requests, 'get', lambda *a, **k: _Resp(200, []))
+    assert scrape_all.fetch_salvos_uplister(snap, _NOW) == _STORES
+
+
+def test_missing_snapshot_means_no_enrichment(tmp_path, monkeypatch):
+    monkeypatch.setattr(scrape_all.requests, 'get', lambda *a, **k: _Resp(502))
+    assert scrape_all.fetch_salvos_uplister(tmp_path / 'none.json', _NOW) == {}
+
+
 # ----- uplister_hours -----
 # The Salvos GraphQL type has no hours field at all, which is why only 9% of Salvos
 # shops had hours before this feed was joined in.

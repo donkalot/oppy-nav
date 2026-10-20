@@ -245,22 +245,67 @@ def uplister_hours(opening_hours):
     return hours
 
 
-def fetch_salvos_uplister():
+UPLISTER_SNAPSHOT = DATA / 'salvos_uplister.json'
+# Hours and closures drift slowly, but a snapshot left to rot would quietly publish
+# shops that have since shut. Past this age the guard fails and files an issue.
+UPLISTER_MAX_SNAPSHOT_DAYS = 60
+
+
+def fetch_salvos_uplister(snapshot=UPLISTER_SNAPSHOT, now=None):
     """Fetch the store-list feed behind the official locator, keyed by warehouse id.
 
-    Returns {} on any failure: this is an enrichment pass, so a dead endpoint should
-    cost hours and pin precision, not the 460-odd shops themselves.
+    Since 2026-10-18 the feed 403s GitHub's runners (any User-Agent) while serving
+    residential IPs, so a failed fetch falls back to the last good copy, refreshed
+    from home with `python scripts/scrape_all.py --refresh-uplister`. Returns {} when
+    both fail: this is an enrichment pass, so it should cost hours and pin precision,
+    not the 460-odd shops themselves.
     """
     print('Salvos: uplister store-list...', flush=True)
     try:
-        r = requests.get(SALVOS_UPLISTER_URL, headers=HEADERS, timeout=60)
-        if r.status_code != 200:
-            print(f'  uplister -> {r.status_code}; skipping enrichment', flush=True)
-            return {}
-        data = r.json()
+        out = fetch_uplister_live()
     except Exception as e:
-        print(f'  uplister err: {e}; skipping enrichment', flush=True)
+        print(f'  uplister failed ({e}); trying snapshot', flush=True)
+        return load_uplister_snapshot(snapshot, now)
+    save_uplister_snapshot(out, snapshot, now)
+    return out
+
+
+def fetch_uplister_live():
+    r = requests.get(SALVOS_UPLISTER_URL, headers=HEADERS, timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f'HTTP {r.status_code}')
+    out = parse_uplister(r.json())
+    if not out:
+        raise RuntimeError('no stores with ids')
+    return out
+
+
+def save_uplister_snapshot(stores, snapshot=UPLISTER_SNAPSHOT, now=None):
+    fetched = (now or datetime.datetime.now(datetime.timezone.utc)).isoformat(timespec='seconds')
+    snapshot.write_text(json.dumps({'fetched_at': fetched, 'stores': stores},
+                                   sort_keys=True, indent=0), encoding='utf-8')
+
+
+def load_uplister_snapshot(snapshot=UPLISTER_SNAPSHOT, now=None):
+    try:
+        blob = json.loads(snapshot.read_text(encoding='utf-8'))
+        fetched = datetime.datetime.fromisoformat(blob['fetched_at'])
+        stores = blob['stores']
+    except Exception as e:
+        print(f'  no usable snapshot ({e}); skipping enrichment', flush=True)
         return {}
+    age = ((now or datetime.datetime.now(datetime.timezone.utc)) - fetched).days
+    if age > UPLISTER_MAX_SNAPSHOT_DAYS:
+        print(f'  snapshot is {age}d old (max {UPLISTER_MAX_SNAPSHOT_DAYS}); skipping '
+              'enrichment. Refresh it from a home connection: '
+              'python scripts/scrape_all.py --refresh-uplister', flush=True)
+        return {}
+    print(f'::warning::Salvos uplister blocked; using {age}d-old snapshot '
+          f'({len(stores)} stores)', flush=True)
+    return stores
+
+
+def parse_uplister(data):
     stores = list(data.values()) if isinstance(data, dict) else list(data or [])
     out = {}
     for s in stores:
@@ -1029,4 +1074,9 @@ def main():
 
 
 if __name__ == '__main__':
+    if sys.argv[1:] == ['--refresh-uplister']:
+        stores = fetch_uplister_live()
+        save_uplister_snapshot(stores)
+        print(f'Saved {len(stores)} stores to {UPLISTER_SNAPSHOT}; commit and push it.')
+        sys.exit(0)
     sys.exit(main() or 0)
